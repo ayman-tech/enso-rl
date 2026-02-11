@@ -1,0 +1,1 @@
+{"columns": ["Parameter", "Value"], "data": [["model_type", "PPO"], ["policy_network", "MlpPolicy"], ["hidden_layers", "Default SB3"], ["learning_rate", "0.0003"], ["gamma", "0.99"], ["gae_lambda", "0.95"]]}

@@ -1,0 +1,1 @@
+{"columns": ["Metric", "With Agent", "Without Agent", "Improvement"], "data": [["Multi-Year Event %", "2.1%", "1.0%", "+1.0pp"], ["Control Type", "RL Agent", "Zero Action", "RL Beats Baseline"]]}

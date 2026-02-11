@@ -1,0 +1,28 @@
+{
+  "os": "Windows-11-10.0.26200-SP0",
+  "python": "CPython 3.12.10",
+  "startedAt": "2026-02-10T19:04:29.618451Z",
+  "program": "c:\\Users\\Aym_s\\projects\\research\\repo\\enso-rl.ipynb",
+  "codePath": "c:\\Users\\Aym_s\\projects\\research\\repo\\enso-rl.ipynb",
+  "codePathLocal": "enso-rl.ipynb",
+  "git": {
+    "remote": "git@github.com:ayman-tech/enso-rl.git",
+    "commit": "4564b1fea36e0fee483ff113340c67d2e5c396b0"
+  },
+  "email": "aym.s1109@gmail.com",
+  "root": "c:\\Users\\Aym_s\\projects\\research\\repo",
+  "host": "aym-win",
+  "executable": "c:\\Users\\Aym_s\\projects\\research\\.venv\\Scripts\\python.exe",
+  "cpu_count": 8,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "510165061632",
+      "used": "370487341056"
+    }
+  },
+  "memory": {
+    "total": "16659693568"
+  },
+  "writerId": "zhyh8vnek9sf820tg1e2ac0uc662m4io"
+}
