@@ -392,48 +392,6 @@ wandb login
 python scripts/train.py --epochs 1000 --lr 0.0001 --debug
 ```
 
-**Problem**: GPU out of memory
-```bash
-# Solution: Use CPU instead or reduce model size
-# Edit config/train_config.py to reduce n_steps
-```
-
-## 📚 Key References
-
-- [Stable Baselines 3 Documentation](https://stable-baselines3.readthedocs.io/)
-- [Gymnasium (Environment) Documentation](https://gymnasium.farama.org/)
-- [Weights & Biases Documentation](https://docs.wandb.ai/)
-- [XRO Climate Model Repository](https://github.com/senclimate/XRO)
-- [PPO Paper](https://arxiv.org/abs/1707.06347)
-
-## 📄 Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@software{enso_rl_2024,
-  title={{ENSO Reinforcement Learning: Climate Control via PPO}},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/your-repo/enso-rl},
-  version={0.1.0}
-}
-```
-
-## 📝 License
-
-[Add your license information here]
-
-## 👥 Contributing
-
-Contributions are welcome! To contribute:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
 ## 📧 Contact & Support
 
 For questions, issues, or suggestions:
@@ -444,6 +402,5 @@ For questions, issues, or suggestions:
 
 ---
 
-**Last Updated**: February 2025  
 **Original Notebook**: `enso-rl.ipynb` (preserved for reference)  
 **Refactored Code Structure**: Organized into modular components following ML best practices
