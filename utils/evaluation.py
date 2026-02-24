@@ -2,6 +2,7 @@
 Evaluation utilities for ENSO RL agent.
 """
 import numpy as np
+from config.env_config import EnvConfig
 
 
 def evaluate_agent(env, agent=None, continuous_steps=6000):
@@ -40,7 +41,7 @@ def evaluate_agent(env, agent=None, continuous_steps=6000):
 
 
 def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None, 
-                       action_scale=None, debug_mode=False):
+                       debug_mode=False):
     """
     Simulate a continuous trajectory with optional action disabling.
     
@@ -49,7 +50,6 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         agent: Trained agent (if None, uses zero actions)
         num_months (int): Duration of simulation
         disable_control_for_idx (int or None): Index of action to disable
-        action_scale (list): Scale factors for actions
         debug_mode (bool): Print debug info
         
     Returns:
@@ -59,6 +59,10 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     from utils.enso_classifier import classify_enso_event, summarize_classification
     
     start_time = time.perf_counter()
+    
+    # Get action_scale from config (single source of truth)
+    env_config = EnvConfig()
+    action_scale = np.array(env_config.action_scale)
     
     simulation_data = []
     obs, _ = env.reset()
@@ -82,11 +86,9 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         if disable_control_for_idx is not None:
             action[disable_control_for_idx] = 0.0
         
-        if action_scale:
-            scaled_action = action * np.array(action_scale)
-            actions_history.append(scaled_action)
-        else:
-            actions_history.append(action)
+        # Store scaled actions for consistent analysis
+        scaled_action = action * action_scale
+        actions_history.append(scaled_action)
         
         obs, reward, terminated, truncated, _ = env.step(action)
         total_rewards += reward
