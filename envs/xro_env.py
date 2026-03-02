@@ -115,41 +115,30 @@ class XROMultiYearEnv(gym.Env):
         threshold = self.threshold
         
         # Initialize reward components
-        enso_reward = 0.0
-        action_penalty = -0.005 * np.sum(np.abs(action) ** 2)
+        action_penalty = -0.002 * np.sum(action ** 2)
         duration_reward = 0.0
         duration_penalty = 0.0
         
-        # ENSO reward and duration tracking
-        is_enso_month = False
-        if enso_index > threshold:
-            enso_reward = 0.1
+        # ENSO duration tracking
+        if enso_index > threshold or enso_index < -threshold:
             self.consecutive_enso_months += 1
-            is_enso_month = True
-        elif enso_index < -threshold:
-            enso_reward = 0.1
-            self.consecutive_enso_months += 1
-            is_enso_month = True
         else:
             self.consecutive_enso_months = 0
         
         # Duration reward (scales with event length)
-        if is_enso_month and self.consecutive_enso_months <= 36:
-            if self.consecutive_enso_months >= 24:
-                duration_reward = 1.0
-            elif self.consecutive_enso_months >= 18:
-                duration_reward = 0.6
-            elif self.consecutive_enso_months >= 12:
-                duration_reward = 0.4
-            elif self.consecutive_enso_months >= 6:
-                duration_reward = 0.2
-        
-        # Duration penalty for unrealistic persistence
-        if self.consecutive_enso_months > 36:
-            duration_penalty = -0.1 * (self.consecutive_enso_months - 36)
+        if self.consecutive_enso_months > 0:
+            if self.consecutive_enso_months <= 6:
+                duration_reward = 0.1    # very soft: event just starting
+            elif self.consecutive_enso_months <= 12:
+                duration_reward = 0.3     # soft: approaching multi-year
+            elif self.consecutive_enso_months <= 24:
+                duration_reward = 1.0     # hard: multi-year event achieved
+            else:
+                # 24+ months: penalty ramps to discourage unrealistic persistence
+                duration_penalty = -0.3 * (self.consecutive_enso_months - 24)
         
         # Combine all components
-        total_reward = enso_reward + duration_reward + duration_penalty #+ action_penalty
+        total_reward = duration_reward + duration_penalty + action_penalty
         
         return float(total_reward)
 

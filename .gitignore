@@ -2,6 +2,7 @@
 wandb/
 */wandb/
 models/
+*plots/
 .python-version
 uv.lock
 

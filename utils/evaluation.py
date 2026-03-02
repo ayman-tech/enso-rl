@@ -41,7 +41,7 @@ def evaluate_agent(env, agent=None, continuous_steps=6000):
 
 
 def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None, 
-                       debug_mode=False):
+                       debug_mode=False, seed=None):
     """
     Simulate a continuous trajectory with optional action disabling.
     
@@ -51,6 +51,9 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         num_months (int): Duration of simulation
         disable_control_for_idx (int or None): Index of action to disable
         debug_mode (bool): Print debug info
+        seed (int or None): Random seed for env.reset(). Fixes initial conditions
+              AND noise sequence. Use the same seed across baseline + interventions
+              for paired comparison.
         
     Returns:
         dict: Simulation data with trajectories and statistics
@@ -65,7 +68,7 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     action_scale = np.array(env_config.action_scale)
     
     simulation_data = []
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     sim_enso_history = [obs[0]]
     actions_history = []
     states_history = [obs[:-1]]

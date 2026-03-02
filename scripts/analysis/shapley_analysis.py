@@ -1,0 +1,336 @@
+"""
+Shapley Value Analysis for ENSO RL Agent Actions.
+
+Computes Shapley values for each action dimension using sampling-based
+approximation (permutation sampling). Uses N independent paired-seed runs
+for statistical robustness with t-tests, 95% CIs, and significance testing.
+
+Usage:
+    python scripts/shapley_analysis.py --model rl_model
+    python scripts/shapley_analysis.py --model rl_model --n-runs 30 --n-permutations 20
+"""
+import sys
+import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+from scipy import stats as sp_stats
+
+# Add repo root to path
+repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(repo_root))
+
+from stable_baselines3 import PPO
+from config import EnvConfig
+from utils.data_processing import load_observational_data, prepare_xro_parameters
+from envs import XROMultiYearEnv
+from utils import suppress_warnings
+from XRO.core import XRO
+
+
+def load_environment(model_path: str, env_config: EnvConfig):
+    """Load trained model and create environment."""
+    model_path_str = model_path
+    if not model_path_str.endswith('.zip'):
+        model_path_str += '.zip'
+    if not model_path_str.startswith('models'):
+        model_path_str = f'models/{model_path_str}'
+
+    model_path = Path(model_path_str)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+
+    obs_ds, train_ds, var_names, bounds = load_observational_data(
+        env_config.data_config["data_path"],
+        env_config.data_config["train_start"],
+        env_config.data_config["train_end"]
+    )
+
+    model_xro = XRO()
+    params = prepare_xro_parameters(model_xro, train_ds, var_names, bounds)
+    params['threshold'] = env_config.threshold
+
+    env = XROMultiYearEnv(
+        params=params, train_ds=train_ds,
+        var_names=var_names, max_steps=env_config.max_steps
+    )
+
+    model = PPO.load(str(model_path), env=env)
+    return model, env, var_names
+
+
+def simulate_with_coalition(env, model, coalition_mask, num_months, seed):
+    """
+    Simulate with only a subset of actions active.
+    Actions outside the coalition are clamped to zero.
+
+    Args:
+        env: Environment
+        model: Trained PPO model
+        coalition_mask: Boolean array [9]. True = action active.
+        num_months: Simulation duration
+        seed: Random seed for env.reset()
+
+    Returns:
+        float: Average reward from the simulation
+    """
+    obs, _ = env.reset(seed=seed)
+    total_reward = 0.0
+
+    for step in range(num_months):
+        action, _ = model.predict(obs, deterministic=True)
+        action = action * coalition_mask.astype(np.float32)
+        obs, reward, terminated, truncated, _ = env.step(action)
+        total_reward += reward
+
+    return total_reward / num_months
+
+
+def compute_shapley_for_seed(env, model, num_months, n_permutations, seed):
+    """
+    Compute Shapley values for a single seed via permutation sampling.
+
+    Args:
+        env: Environment
+        model: Trained model
+        num_months: Months per simulation
+        n_permutations: Number of random permutations
+        seed: Seed for env.reset() (shared across all coalition evaluations)
+
+    Returns:
+        np.ndarray: Shapley values for this seed [9]
+        np.ndarray: Per-permutation marginals [n_permutations, 9]
+    """
+    n_actions = 9
+    all_marginals = np.zeros((n_permutations, n_actions))
+
+    for perm_idx in range(n_permutations):
+        perm = np.random.permutation(n_actions)
+
+        prev_value = simulate_with_coalition(
+            env, model,
+            coalition_mask=np.zeros(n_actions, dtype=bool),
+            num_months=num_months, seed=seed
+        )
+
+        for pos in range(n_actions):
+            feature_idx = perm[pos]
+            coalition = np.zeros(n_actions, dtype=bool)
+            coalition[perm[:pos + 1]] = True
+
+            current_value = simulate_with_coalition(
+                env, model, coalition_mask=coalition,
+                num_months=num_months, seed=seed
+            )
+            all_marginals[perm_idx, feature_idx] = current_value - prev_value
+            prev_value = current_value
+
+    shapley_values = all_marginals.mean(axis=0)
+    return shapley_values, all_marginals
+
+
+def compute_statistics(shapley_per_run, action_names):
+    """
+    Compute paired-run statistics on Shapley values.
+
+    Args:
+        shapley_per_run: [N_RUNS, 9] Shapley values per run
+        action_names: list of action names
+
+    Returns:
+        list of dicts with per-feature statistics
+    """
+    n_runs = shapley_per_run.shape[0]
+    stats = []
+
+    for i, name in enumerate(action_names):
+        values = shapley_per_run[:, i]
+        mean_sv = values.mean()
+        std_sv = values.std(ddof=1)
+        se_sv = std_sv / np.sqrt(n_runs)
+        ci_95 = sp_stats.t.ppf(0.975, df=n_runs - 1) * se_sv
+
+        # t-test: is Shapley value significantly different from 0?
+        t_stat = mean_sv / se_sv if se_sv > 0 else 0
+        p_value = 2 * sp_stats.t.sf(abs(t_stat), df=n_runs - 1)
+
+        stats.append({
+            'feature': name,
+            'mean': mean_sv,
+            'std': std_sv,
+            'ci_95': ci_95,
+            'p_value': p_value,
+        })
+
+    return stats
+
+
+def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir):
+    """Generate Shapley value plots with significance annotations."""
+
+    # Sort by absolute mean Shapley value
+    sorted_idx = np.argsort([abs(s['mean']) for s in stats])[::-1]
+
+    sorted_names = [stats[i]['feature'] for i in sorted_idx]
+    sorted_means = [stats[i]['mean'] for i in sorted_idx]
+    sorted_cis = [stats[i]['ci_95'] for i in sorted_idx]
+    sorted_pvals = [stats[i]['p_value'] for i in sorted_idx]
+
+    # Color by significance & direction
+    colors = []
+    edge_colors = []
+    for s_idx in sorted_idx:
+        s = stats[s_idx]
+        if s['p_value'] >= 0.05:
+            colors.append('#999999')
+            edge_colors.append('#CCCCCC')
+        elif s['mean'] > 0:
+            colors.append('#D32F2F')
+            edge_colors.append('black')
+        else:
+            colors.append('#1976D2')
+            edge_colors.append('black')
+
+    # --- Bar Chart with CIs + significance stars ---
+    fig, ax = plt.subplots(figsize=(14, 7))
+    bars = ax.bar(sorted_names, sorted_means, color=colors, edgecolor=edge_colors,
+                  linewidth=1.5, yerr=sorted_cis, capsize=6,
+                  error_kw={'linewidth': 1.5, 'capthick': 1.5})
+
+    for i, (mean_val, ci_val, p_val) in enumerate(zip(sorted_means, sorted_cis, sorted_pvals)):
+        star = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
+        y_pos = mean_val + ci_val + 0.001 if mean_val >= 0 else mean_val - ci_val - 0.001
+        va = 'bottom' if mean_val >= 0 else 'top'
+        ax.text(i, y_pos, star, ha='center', va=va, fontsize=11, fontweight='bold')
+
+    ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+    ax.set_xlabel('Action Variable', fontsize=13)
+    ax.set_ylabel(f'Mean Shapley Value ± 95% CI (N={n_runs})', fontsize=13)
+    ax.set_title('Shapley Value Analysis: Action Importance for ENSO Control', fontsize=15)
+    ax.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
+    ax.grid(axis='y', alpha=0.3)
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#D32F2F', edgecolor='black', label='Significant positive (p<0.05)'),
+        Patch(facecolor='#1976D2', edgecolor='black', label='Significant negative (p<0.05)'),
+        Patch(facecolor='#999999', edgecolor='#CCCCCC', label='Not significant (p≥0.05)'),
+    ]
+    ax.legend(handles=legend_elements, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(output_dir / 'shapley_values_bar.png', dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved {output_dir / 'shapley_values_bar.png'}")
+
+    # --- Boxplot of per-run Shapley values ---
+    fig2, ax2 = plt.subplots(figsize=(14, 7))
+    bp = ax2.boxplot(
+        [shapley_per_run[:, i] for i in sorted_idx],
+        labels=sorted_names, patch_artist=True, vert=True
+    )
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+
+    ax2.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+    ax2.set_xlabel('Action Variable', fontsize=13)
+    ax2.set_ylabel(f'Shapley Value (N={n_runs} independent runs)', fontsize=13)
+    ax2.set_title('Distribution of Shapley Values Across Runs', fontsize=15)
+    ax2.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
+    ax2.grid(axis='y', alpha=0.3)
+    fig2.tight_layout()
+    fig2.savefig(output_dir / 'shapley_values_dist.png', dpi=150, bbox_inches='tight')
+    plt.close(fig2)
+    print(f"  Saved {output_dir / 'shapley_values_dist.png'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Shapley Value Analysis for ENSO RL Agent")
+    parser.add_argument("--model", type=str, default="rl_model", help="Path to trained model")
+    parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
+    parser.add_argument("--n-runs", type=int, default=30, help="Number of independent seeds (paired trials)")
+    parser.add_argument("--n-permutations", type=int, default=20, help="Permutations per run")
+    parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
+    args = parser.parse_args()
+
+    suppress_warnings()
+    np.random.seed(args.master_seed)
+
+    output_dir = Path("plots/shapley")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("SHAPLEY VALUE ANALYSIS FOR ENSO RL AGENT")
+    print("=" * 70)
+
+    env_config = EnvConfig()
+    model, env, var_names = load_environment(args.model, env_config)
+    action_names = list(var_names[1:])
+
+    # Generate shared seeds from master RNG
+    master_rng = np.random.default_rng(args.master_seed)
+    shared_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
+
+    n_actions = 9
+    total_sims = args.n_runs * args.n_permutations * (n_actions + 1)
+    print(f"\n  N_RUNS          = {args.n_runs}")
+    print(f"  N_PERMUTATIONS  = {args.n_permutations}")
+    print(f"  SIM_MONTHS      = {args.months} ({args.months // 12} years)")
+    print(f"  Total sims      = {total_sims}")
+    print(f"{'=' * 70}\n")
+
+    # Compute per-run Shapley values
+    shapley_per_run = np.zeros((args.n_runs, n_actions))
+
+    for run_idx, seed in enumerate(shared_seeds):
+        print(f"--- Run {run_idx+1}/{args.n_runs} (seed={seed}) ---")
+        sv, marginals = compute_shapley_for_seed(
+            env, model, args.months, args.n_permutations, seed
+        )
+        shapley_per_run[run_idx] = sv
+
+        top_idx = np.argmax(np.abs(sv))
+        print(f"  Top driver this run: {action_names[top_idx]} (SV={sv[top_idx]:+.6f})\n")
+
+    # Statistical analysis
+    stats = compute_statistics(shapley_per_run, action_names)
+
+    print(f"\n{'='*100}")
+    print(f"PAIRED SHAPLEY ANALYSIS — Statistical Summary (N={args.n_runs} runs)")
+    print(f"{'='*100}")
+    print(f"{'Feature':<10} | {'Mean SV':>10} | {'Std':>8} | {'95% CI':>20} | {'p-value':>10} | {'Sig?':>6}")
+    print(f"{'-'*80}")
+
+    for s in sorted(stats, key=lambda x: abs(x['mean']), reverse=True):
+        ci_lo = s['mean'] - s['ci_95']
+        ci_hi = s['mean'] + s['ci_95']
+        sig = "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
+        print(f"{s['feature']:<10} | {s['mean']:>+10.6f} | {s['std']:>8.6f} | [{ci_lo:>+9.6f}, {ci_hi:>+9.6f}] | {s['p_value']:>10.4f} | {sig:>6}")
+
+    print(f"\nSum of Shapley values (mean): {shapley_per_run.mean(axis=0).sum():.6f}")
+    print("(Should ≈ V(all actions) - V(no actions))")
+    print(f"\nSignificance: *** p<0.001, ** p<0.01, * p<0.05, ns = not significant")
+
+    # Save
+    np.savez(
+        output_dir / 'shapley_results.npz',
+        shapley_per_run=shapley_per_run,
+        action_names=action_names,
+        n_runs=args.n_runs,
+        n_permutations=args.n_permutations,
+        months=args.months,
+        seeds=shared_seeds,
+    )
+    print(f"\nResults saved to {output_dir / 'shapley_results.npz'}")
+
+    # Plot
+    print("\nGenerating plots...")
+    plot_shapley_values(stats, shapley_per_run, action_names, args.n_runs, output_dir)
+
+    print(f"\n{'=' * 70}")
+    print("SHAPLEY ANALYSIS COMPLETE")
+    print(f"{'=' * 70}")
+
+
+if __name__ == "__main__":
+    main()
