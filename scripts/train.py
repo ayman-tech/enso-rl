@@ -157,12 +157,13 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig):
         
         # Save model
         model.save(train_config.model_save_path)
+        train_config.model_save_path = "models/"+wandb_config.name
         print(f"[OK] Model saved to {train_config.model_save_path}.zip")
         
         # Log model as artifact (only if W&B is enabled)
         if wandb.run is not None:
             artifact = wandb.Artifact(
-                name=f"ppo-enso-model-{wandb.run.id}",
+                name=f"{wandb_config.name}-{wandb.run.id}",
                 type="model",
                 description="Trained PPO model for ENSO climate control"
             )

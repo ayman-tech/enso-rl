@@ -13,6 +13,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import wandb
 from pathlib import Path
+from scipy import stats as sp_stats
 
 # Add repo root to path for imports
 repo_root = Path(__file__).parent.parent
@@ -26,8 +27,8 @@ from utils.data_processing import load_observational_data, prepare_xro_parameter
 from utils.evaluation import evaluate_agent, simulate_trajectory
 from utils.visualization import (
     plot_enso_trajectory, plot_control_actions, plot_state_variables,
-    plot_feature_importance, plot_event_classification, plot_action_kde_by_event, 
-    plot_state_kde_by_event
+    plot_feature_importance, plot_robust_interventional, plot_event_classification,
+    plot_action_kde_by_event, plot_state_kde_by_event
 )
 from utils.enso_table import (
     save_enso_table_html, save_enso_table_matplotlib, log_enso_table_wandb
@@ -148,77 +149,158 @@ def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False):
     return results
 
 
-def run_interventional_analysis(model, env, var_names, disable_idx=None, num_months=240, wandb_enabled=False):
+def run_interventional_analysis(model, env, var_names, disable_idx=None, num_months=1200,
+                                 n_runs=30, master_seed=42, wandb_enabled=False):
     """
-    Run interventional analysis (ablation study).
+    Run robust interventional analysis (ablation study) with N paired-seed trials.
+    
+    For each trial, baseline + all 9 interventions share the same seed, ensuring:
+    - Fixed initial conditions (env.reset(seed=s) picks same starting state)
+    - Fixed noise sequence (env's RNG produces identical XRO noise realizations)
+    - Averaged over N runs — N paired ΔR samples per feature
+    
+    The only difference between conditions is the disabled action → clean causal signal.
     
     Args:
         model: Trained model
         env: Environment
         var_names (list): Variable names
         disable_idx (int or None): Index to disable (-1 for all)
-        num_months (int): Number of simulation months
+        num_months (int): Number of simulation months per run
+        n_runs (int): Number of paired trials
+        master_seed (int): Master random seed for reproducibility
         wandb_enabled (bool): Whether W&B is enabled
         
     Returns:
-        list: Delta R values with plotting
+        list: Delta R values with statistical results
     """
-    print("\n" + "="*70)
-    print("INTERVENTIONAL ANALYSIS (ABLATION STUDY)")
-    print("="*70)
+    print("\n" + "="*80)
+    print("ROBUST INTERVENTIONAL ANALYSIS (ABLATION STUDY)")
+    print("="*80)
     
-    # Get baseline
-    print("\nCollecting baseline performance...")
-    baseline_sim = simulate_trajectory(
-        env, agent=model, num_months=num_months,
-        disable_control_for_idx=None, debug_mode=False
-    )
-    baseline_reward = baseline_sim['avg_reward']
-    baseline_prob = baseline_sim['mye_probability']
+    controllable_vars = list(var_names[1:])  # Skip Nino34
+    n_features = len(controllable_vars)
     
-    print(f"Baseline reward:             {baseline_reward:.4f}")
-    print(f"Baseline multi-year prob:    {baseline_prob:.2%}")
+    # Generate shared seeds from master RNG
+    master_rng = np.random.default_rng(master_seed)
+    shared_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(n_runs)]
     
-    # Test disabling each action
-    controllable_vars = var_names[1:]  # Skip Nino34
+    print(f"  N_RUNS       = {n_runs}")
+    print(f"  SIM_MONTHS   = {num_months} ({num_months//12} years per run)")
+    print(f"  Features     = {n_features}")
+    print(f"  Total sims   = {n_runs} x {n_features + 1} = {n_runs * (n_features + 1)}")
+    print("="*80 + "\n")
     
-    print(f"\nTesting impact of disabling each action ({len(controllable_vars)} variables)...")
-    print("-"*70)
-    print(f"{'Variable':<12} | {'Avg Reward':<12} | {'Delta R':<12} | {'MYE Prob':<12}")
-    print("-"*70)
+    # Storage: rows = runs, cols = [baseline, feat_0, feat_1, ..., feat_8]
+    all_rewards = np.zeros((n_runs, n_features + 1))
+    all_mye_probs = np.zeros((n_runs, n_features + 1))
     
-    delta_r_values = []
-    
-    for i, var_name in enumerate(controllable_vars):
-        sim = simulate_trajectory(
+    for run_idx, seed in enumerate(shared_seeds):
+        print(f"--- Run {run_idx+1}/{n_runs} (seed={seed}) ---")
+        
+        # Baseline (full control) with this seed
+        baseline_sim = simulate_trajectory(
             env, agent=model, num_months=num_months,
-            disable_control_for_idx=i, debug_mode=False
+            disable_control_for_idx=None, debug_mode=False, seed=seed
         )
+        all_rewards[run_idx, 0] = baseline_sim['avg_reward']
+        all_mye_probs[run_idx, 0] = baseline_sim['mye_probability']
         
-        delta_r = sim['avg_reward'] - baseline_reward
+        # Each intervention with the SAME seed → paired comparison
+        for feat_idx in range(n_features):
+            disabled_sim = simulate_trajectory(
+                env, agent=model, num_months=num_months,
+                disable_control_for_idx=feat_idx, debug_mode=False, seed=seed
+            )
+            all_rewards[run_idx, feat_idx + 1] = disabled_sim['avg_reward']
+            all_mye_probs[run_idx, feat_idx + 1] = disabled_sim['mye_probability']
+        
+        # Quick summary for this run
+        run_baseline = all_rewards[run_idx, 0]
+        run_deltas = all_rewards[run_idx, 1:] - run_baseline
+        worst_feat = controllable_vars[np.argmin(run_deltas)]
+        print(f"  Baseline reward: {run_baseline:.4f} | Strongest driver: {worst_feat} (ΔR={run_deltas.min():.4f})\n")
+    
+    print(f"\n{'='*80}")
+    print(f"All {n_runs} paired trials completed.")
+    print(f"{'='*80}")
+    
+    # === Statistical Analysis ===
+    # Compute paired ΔR: shape [n_runs, n_features]
+    delta_r_matrix = all_rewards[:, 1:] - all_rewards[:, 0:1]
+    
+    mean_delta_r = delta_r_matrix.mean(axis=0)
+    std_delta_r = delta_r_matrix.std(axis=0, ddof=1)
+    se_delta_r = std_delta_r / np.sqrt(n_runs)
+    ci_95 = sp_stats.t.ppf(0.975, df=n_runs - 1) * se_delta_r
+    
+    # One-sample t-test: is ΔR significantly different from 0?
+    t_stats = mean_delta_r / se_delta_r
+    p_values = 2 * sp_stats.t.sf(np.abs(t_stats), df=n_runs - 1)
+    
+    # MYE probability deltas
+    delta_mye_matrix = all_mye_probs[:, 1:] - all_mye_probs[:, 0:1]
+    mean_delta_mye = delta_mye_matrix.mean(axis=0)
+    
+    print(f"\n{'='*100}")
+    print(f"PAIRED INTERVENTIONAL ANALYSIS — Statistical Summary (N={n_runs} runs)")
+    print(f"{'='*100}")
+    print(f"{'Feature':<10} | {'Mean ΔR':>10} | {'Std':>8} | {'95% CI':>20} | {'p-value':>10} | {'Sig?':>6} | {'ΔMYE%':>8}")
+    print(f"{'-'*100}")
+    
+    for i, feat in enumerate(controllable_vars):
+        ci_lo = mean_delta_r[i] - ci_95[i]
+        ci_hi = mean_delta_r[i] + ci_95[i]
+        sig = "***" if p_values[i] < 0.001 else "**" if p_values[i] < 0.01 else "*" if p_values[i] < 0.05 else "ns"
+        print(f"{feat:<10} | {mean_delta_r[i]:>+10.4f} | {std_delta_r[i]:>8.4f} | [{ci_lo:>+8.4f}, {ci_hi:>+8.4f}] | {p_values[i]:>10.4f} | {sig:>6} | {mean_delta_mye[i]:>+7.2%}")
+    
+    print(f"\nBaseline avg reward (mean over {n_runs} runs): {all_rewards[:, 0].mean():.4f} +/- {all_rewards[:, 0].std(ddof=1):.4f}")
+    print(f"Significance: *** p<0.001, ** p<0.01, * p<0.05, ns = not significant")
+    
+    # Build delta_r_values list (used by downstream code)
+    delta_r_values = []
+    for i, feat in enumerate(controllable_vars):
         delta_r_values.append({
-            'feature': var_name,
-            'avg_reward': sim['avg_reward'],
-            'delta_r': delta_r,
-            'mye_probability': sim['mye_probability'],
+            'feature': feat,
+            'delta_r': mean_delta_r[i],
+            'ci_95': ci_95[i],
+            'std': std_delta_r[i],
+            'p_value': p_values[i],
+            'delta_mye': mean_delta_mye[i],
+            'avg_reward': all_rewards[:, i + 1].mean(),
         })
-        
-        significance = "CRITICAL" if delta_r < -0.01 else "POSITIVE" if delta_r > 0.01 else "NEUTRAL"
-        print(f"{var_name:<12} | {sim['avg_reward']:<12.4f} | {delta_r:<12.4f} | {sim['mye_probability']:<12.2%}")
     
-    print("-"*70)
+    # Ranking
+    print(f"\n{'='*80}")
+    print("Delta R Ranking (Most Negative = Strongest Driver):")
+    print(f"{'='*80}")
+    print(f"Baseline Reward (mean +/- std): {all_rewards[:, 0].mean():.4f} +/- {all_rewards[:, 0].std(ddof=1):.4f}\n")
     
-    # Sort by importance
-    sorted_results = sorted(delta_r_values, key=lambda x: x['delta_r'])
-    print("\nRanking by importance (most to least important):")
-    print("-"*70)
-    for i, result in enumerate(sorted_results, 1):
-        print(f"{i}. {result['feature']:<10} - DR: {result['delta_r']:>8.4f}")
+    for item in sorted(delta_r_values, key=lambda x: x['delta_r']):
+        sig = "***" if item['p_value'] < 0.001 else "**" if item['p_value'] < 0.01 else "*" if item['p_value'] < 0.05 else "ns"
+        direction = "DRIVER" if item['delta_r'] < 0 and item['p_value'] < 0.05 else "HELPS" if item['delta_r'] > 0 and item['p_value'] < 0.05 else "UNCLEAR"
+        print(f"{item['feature']:<10} | ΔR: {item['delta_r']:>+8.4f} +/- {item['ci_95']:.4f} | {direction} {sig}")
     
-    # Generate feature importance plot
-    print("\nGenerating feature importance plot...")
-    plot_feature_importance(delta_r_values, wandb_enabled=wandb_enabled)
-    print("[OK] Feature importance plot saved to plots/04_feature_importance.png")
+    # === Robust Plot (matching notebook) ===
+    print("\nGenerating robust interventional analysis plot...")
+    plot_robust_interventional(delta_r_values, n_runs, wandb_enabled)
+    print("[OK] Robust plot saved to plots/interventional_analysis_robust.png")
+    
+    # Save numerical results
+    output_dir = Path("plots")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        output_dir / 'interventional_results.npz',
+        all_rewards=all_rewards,
+        all_mye_probs=all_mye_probs,
+        delta_r_matrix=delta_r_matrix,
+        delta_mye_matrix=delta_mye_matrix,
+        controllable_vars=controllable_vars,
+        n_runs=n_runs,
+        num_months=num_months,
+        seeds=shared_seeds,
+    )
+    print(f"[OK] Results saved to {output_dir / 'interventional_results.npz'}")
     
     return delta_r_values
 
@@ -324,7 +406,9 @@ def main():
     parser.add_argument("--intervention", action="store_true", help="Run interventional analysis")
     parser.add_argument("--trajectory", action="store_true", help="Run trajectory analysis")
     parser.add_argument("--all", action="store_true", help="Run all evaluations")
-    parser.add_argument("--months", type=int, default=240, help="Simulation months")
+    parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
+    parser.add_argument("--n-runs", type=int, default=30, help="Number of paired trials for interventional analysis")
+    parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     args = parser.parse_args()
     
     # Set to run all if none specified
@@ -348,7 +432,9 @@ def main():
             run_basic_evaluation(model, env, num_months=args.months, wandb_enabled=wandb_enabled)
 
         if args.all or args.intervention:
-            run_interventional_analysis(model, env, var_names, num_months=args.months, wandb_enabled=wandb_enabled)
+            run_interventional_analysis(model, env, var_names, num_months=args.months,
+                                        n_runs=args.n_runs, master_seed=args.master_seed,
+                                        wandb_enabled=wandb_enabled)
         
         if args.all or args.trajectory:
             run_trajectory_analysis(model, env, var_names, num_months=args.months, wandb_enabled=wandb_enabled)

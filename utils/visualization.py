@@ -162,12 +162,16 @@ def plot_state_variables(states_traj, var_names, threshold=1.0, num_months=None,
     return save_and_log_plot(fig, "03_state_variables", wandb_enabled)
 
 
-def plot_feature_importance(delta_r_values, wandb_enabled=False):
+def plot_robust_interventional(delta_r_values, n_runs, wandb_enabled=False):
     """
-    Plot feature importance from interventional analysis.
+    Generate robust interventional analysis plot with CIs and significance stars.
+    
+    Matches the notebook's robust interventional analysis visualization:
+    bars colored by significance & direction, 95% CI error bars, significance stars.
     
     Args:
-        delta_r_values (list): List of dicts with 'feature' and 'delta_r' keys
+        delta_r_values (list): List of dicts with 'feature', 'delta_r', 'ci_95', 'p_value' keys
+        n_runs (int): Number of paired trials (shown in axis label)
         wandb_enabled (bool): Log to W&B
         
     Returns:
@@ -175,44 +179,53 @@ def plot_feature_importance(delta_r_values, wandb_enabled=False):
     """
     features = [item['feature'] for item in delta_r_values]
     delta_r_vals = [item['delta_r'] for item in delta_r_values]
+    ci_vals = [item['ci_95'] for item in delta_r_values]
+    p_vals = [item['p_value'] for item in delta_r_values]
     
-    # Sort by delta_r
-    sorted_idx = np.argsort(delta_r_vals)
-    features = [features[i] for i in sorted_idx]
-    delta_r_vals = [delta_r_vals[i] for i in sorted_idx]
+    # Color by significance & direction
+    colors = []
+    edge_colors = []
+    for dr, pv in zip(delta_r_vals, p_vals):
+        if pv >= 0.05:
+            colors.append('#999999')
+            edge_colors.append('#CCCCCC')
+        elif dr < 0:
+            colors.append('#D32F2F')
+            edge_colors.append('black')
+        else:
+            colors.append('#1976D2')
+            edge_colors.append('black')
     
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig, ax = plt.subplots(figsize=(30, 8))
     
-    # Color scheme: red for negative (strong drivers), blue for positive
-    colors = ['red' if dr < 0 else 'blue' for dr in delta_r_vals]
-    bars = ax.bar(features, delta_r_vals, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
+    bars = ax.bar(features, delta_r_vals, color=colors, edgecolor=edge_colors, linewidth=1.5,
+                  yerr=ci_vals, capsize=6, error_kw={'linewidth': 1.5, 'capthick': 1.5})
     
-    # Add value labels on bars
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.4f}',
-                ha='center', va='bottom' if height > 0 else 'top', fontsize=9)
+    # Significance stars above bars
+    for i, (dr, ci, pv) in enumerate(zip(delta_r_vals, ci_vals, p_vals)):
+        star = '***' if pv < 0.001 else '**' if pv < 0.01 else '*' if pv < 0.05 else 'ns'
+        y_pos = dr + ci + 0.002 if dr >= 0 else dr - ci - 0.002
+        va = 'bottom' if dr >= 0 else 'top'
+        ax.text(i, y_pos, star, ha='center', va=va, fontsize=11, fontweight='bold')
     
-    ax.axhline(0, color='gray', linestyle='--', linewidth=2)
+    ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+    ax.set_xlabel('Controllable Features', fontsize=13)
+    ax.set_ylabel(f'Mean ΔR ± 95% CI  (N={n_runs} paired runs)', fontsize=13)
+    ax.set_title('Robust Interventional Driver Analysis: Impact of Disabling Control Actions', fontsize=15)
     
-    ax.set_xlabel('Controllable Features', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Delta R (Impact on Reward)', fontsize=12, fontweight='bold')
-    ax.set_title('Interventional Driver Analysis: Impact of Disabling Control Actions', 
-                 fontsize=13, fontweight='bold')
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#D32F2F', edgecolor='black', label='Significant Driver (ΔR < 0, p < 0.05)'),
+        Patch(facecolor='#1976D2', edgecolor='black', label='Significant Positive (ΔR > 0, p < 0.05)'),
+        Patch(facecolor='#999999', edgecolor='#CCCCCC', label='Not Significant (p ≥ 0.05)'),
+    ]
+    ax.legend(handles=legend_elements, fontsize=11, loc='best')
     
-    # Legend
-    red_patch = plt.Line2D([0], [0], marker='s', color='w', label='Negative ΔR (Strong Driver)',
-                          markerfacecolor='red', markersize=10)
-    blue_patch = plt.Line2D([0], [0], marker='s', color='w', label='Positive ΔR (Weak Driver)',
-                           markerfacecolor='blue', markersize=10)
-    ax.legend(handles=[red_patch, blue_patch], fontsize=10, loc='upper left')
-    
+    ax.set_xticklabels(features, rotation=45, ha='right', fontsize=12)
     ax.grid(axis='y', linestyle='--', alpha=0.5)
-    plt.xticks(rotation=45, ha='right')
     fig.tight_layout()
     
-    return save_and_log_plot(fig, "04_feature_importance", wandb_enabled)
+    return save_and_log_plot(fig, "interventional_analysis_robust", wandb_enabled)
 
 
 def plot_event_classification(enso_traj, classifications_array, num_months=None, wandb_enabled=False):

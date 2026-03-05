@@ -10,7 +10,7 @@ class EnvConfig:
     """Configuration for XROMultiYearEnv."""
     
     # ENSO threshold for determining events
-    threshold: float = 1.0
+    threshold: float = 0.5
     
     # Action scaling factors for each controllable variable
     # (WWV, NPMM, SPMM, IOB, IOD, SIOD, TNA, ATL3, SASD)

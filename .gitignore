@@ -5,6 +5,7 @@ models/
 *plots/
 .python-version
 uv.lock
+trajectory_analysis.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

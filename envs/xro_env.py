@@ -53,7 +53,7 @@ class XROMultiYearEnv(gym.Env):
         
         self.enso_history = []
         self.consecutive_enso_months = 0
-        self.threshold = params.get('threshold', 1.0)
+        self.threshold = params.get('threshold', 0.5)
 
     def reset(self, seed=None):
         """Reset environment to initial state."""
