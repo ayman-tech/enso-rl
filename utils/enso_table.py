@@ -9,27 +9,23 @@ import matplotlib.patches as mpatches
 import wandb
 
 
-def create_enso_table(enso_traj, threshold=1.0, rolling_window=3):
+def create_enso_table(enso_traj, threshold=0.5):
     """
     Create a formatted ENSO table (years x 3-month seasons).
     
     Args:
-        enso_traj (array): ENSO time series
+        enso_traj (array): ENSO time series (already smooth / ONI)
         threshold (float): Threshold for coloring
-        rolling_window (int): Window for rolling mean
         
     Returns:
         pd.DataFrame: Styled dataframe with ENSO values
     """
-    # Calculate rolling mean
-    enso_data_smooth = pd.Series(enso_traj).rolling(
-        window=rolling_window, center=True, min_periods=2
-    ).mean().values
+    enso_data = np.asarray(enso_traj)
     
     # Reshape into years x seasons
     n_months = 12
-    n_years = len(enso_data_smooth) // n_months
-    data_full_years = enso_data_smooth[:n_years * n_months]
+    n_years = len(enso_data) // n_months
+    data_full_years = enso_data[:n_years * n_months]
     reshaped_data = data_full_years.reshape(n_years, n_months)
     
     # Create DataFrame with 3-month season labels
@@ -41,7 +37,7 @@ def create_enso_table(enso_traj, threshold=1.0, rolling_window=3):
     return df_enso
 
 
-def style_enso_table(df_enso, threshold=1.0):
+def style_enso_table(df_enso, threshold=0.5):
     """
     Apply styling to ENSO table.
     
@@ -65,16 +61,15 @@ def style_enso_table(df_enso, threshold=1.0):
     return styler
 
 
-def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", threshold=1.0, 
-                          rolling_window=3, wandb_enabled=False):
+def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", threshold=0.5, 
+                          wandb_enabled=False):
     """
     Save ENSO table as an interactive HTML file.
     
     Args:
-        enso_traj (array): ENSO time series
+        enso_traj (array): ENSO time series (already ONI)
         output_path (str): Path to save HTML file
         threshold (float): Threshold for coloring
-        rolling_window (int): Window for rolling mean
         wandb_enabled (bool): Log to W&B
         
     Returns:
@@ -84,7 +79,7 @@ def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", thresho
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     
     # Create and style table
-    df_enso = create_enso_table(enso_traj, threshold, rolling_window)
+    df_enso = create_enso_table(enso_traj, threshold)
     styler = style_enso_table(df_enso, threshold)
     
     # Add metadata to HTML
@@ -124,16 +119,15 @@ def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", thresho
     return output_path
 
 
-def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", threshold=1.0,
-                               rolling_window=3, wandb_enabled=False):
+def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", threshold=0.5,
+                               wandb_enabled=False):
     """
     Save ENSO table as a PNG image using matplotlib.
     
     Args:
-        enso_traj (array): ENSO time series
+        enso_traj (array): ENSO time series (already ONI)
         output_path (str): Path to save PNG file
         threshold (float): Threshold for coloring
-        rolling_window (int): Window for rolling mean
         wandb_enabled (bool): Log to W&B
         
     Returns:
@@ -143,7 +137,7 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     
     # Create and style table
-    df_enso = create_enso_table(enso_traj, threshold, rolling_window)
+    df_enso = create_enso_table(enso_traj, threshold)
     
     # Create figure
     fig, ax = plt.subplots(figsize=(16, 10))
@@ -213,20 +207,19 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     return output_path
 
 
-def log_enso_table_wandb(enso_traj, threshold=1.0, rolling_window=3):
+def log_enso_table_wandb(enso_traj, threshold=0.5):
     """
     Log ENSO table directly to W&B as a formatted table.
     
     Args:
-        enso_traj (array): ENSO time series
+        enso_traj (array): ENSO time series (already ONI)
         threshold (float): Threshold for coloring
-        rolling_window (int): Window for rolling mean
     """
     if wandb.run is None:
         print("[WARNING] W&B not initialized. Skipping W&B table logging.")
         return
     
-    df_enso = create_enso_table(enso_traj, threshold, rolling_window)
+    df_enso = create_enso_table(enso_traj, threshold)
     
     # Create W&B table
     table_data = []

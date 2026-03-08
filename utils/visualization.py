@@ -38,38 +38,6 @@ def save_and_log_plot(fig, plot_name, wandb_enabled=False):
     return file_path
 
 
-def plot_enso_trajectory(enso_traj, threshold=1.0, num_months=None, wandb_enabled=False):
-    """
-    Plot ENSO index trajectory with thresholds.
-    
-    Args:
-        enso_traj (array): ENSO index time series
-        threshold (float): Threshold value for El Niño/La Niña
-        num_months (int): Total number of months (for label)
-        wandb_enabled (bool): Log to W&B
-        
-    Returns:
-        str: Path to saved plot
-    """
-    if num_months is None:
-        num_months = len(enso_traj)
-    
-    fig, ax = plt.subplots(figsize=(20, 6))
-    
-    ax.plot(enso_traj, linewidth=1.5, label='ENSO Index (Continuous)', color='black')
-    ax.axhline(threshold, color='r', linestyle='--', label='El Niño Threshold', alpha=0.7, linewidth=2)
-    ax.axhline(-threshold, color='b', linestyle='--', label='La Niña Threshold', alpha=0.7, linewidth=2)
-    ax.axhline(0, color='gray', linestyle=':', alpha=0.5)
-    
-    ax.set_title("ENSO Index Trajectory (Continuous Control)", fontsize=14, fontweight='bold')
-    ax.set_xlabel(f"Time (months) - Total {num_months} months", fontsize=12)
-    ax.set_ylabel("Nino34 Index", fontsize=12)
-    ax.legend(loc='upper right', fontsize=11)
-    ax.grid(True, alpha=0.3)
-    
-    return save_and_log_plot(fig, "01_enso_trajectory", wandb_enabled)
-
-
 def plot_control_actions(actions_traj, var_names, num_months=None, wandb_enabled=False):
     """
     Plot control actions for each variable.
@@ -113,7 +81,7 @@ def plot_control_actions(actions_traj, var_names, num_months=None, wandb_enabled
     return save_and_log_plot(fig, "02_control_actions", wandb_enabled)
 
 
-def plot_state_variables(states_traj, var_names, threshold=1.0, num_months=None, wandb_enabled=False):
+def plot_state_variables(states_traj, var_names, threshold=0.5, num_months=None, wandb_enabled=False):
     """
     Plot state variables trajectory.
     
@@ -228,7 +196,7 @@ def plot_robust_interventional(delta_r_values, n_runs, wandb_enabled=False):
     return save_and_log_plot(fig, "interventional_analysis_robust", wandb_enabled)
 
 
-def plot_event_classification(enso_traj, classifications_array, num_months=None, wandb_enabled=False):
+def plot_nino_classification(enso_traj, classifications_array, threshold=0.5, num_months=None, wandb_enabled=False):
     """
     Plot ENSO trajectory with month-by-month event classification.
     
@@ -244,14 +212,14 @@ def plot_event_classification(enso_traj, classifications_array, num_months=None,
     if num_months is None:
         num_months = len(enso_traj)
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 8), height_ratios=[3, 1])
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(30, 8), height_ratios=[3, 1])
     
     # Plot 1: ENSO index with thresholds
     ax1.plot(enso_traj, linewidth=1.5, label='ENSO Index', color='black', zorder=3)
     ax1.set_xlim(0, len(enso_traj))
     
-    ax1.axhline(1.0, color='r', linestyle='--', alpha=0.5, linewidth=1.5, label='El Niño Threshold')
-    ax1.axhline(-1.0, color='b', linestyle='--', alpha=0.5, linewidth=1.5, label='La Niña Threshold')
+    ax1.axhline(threshold, color='r', linestyle='--', alpha=0.5, linewidth=1.5, label='El Niño Threshold')
+    ax1.axhline(-threshold, color='b', linestyle='--', alpha=0.5, linewidth=1.5, label='La Niña Threshold')
     ax1.axhline(0, color='gray', linestyle=':', alpha=0.5)
     ax1.set_title("ENSO Index with Month-by-Month Event Classification", fontsize=14, fontweight='bold')
     ax1.set_ylabel("Nino34 Index", fontsize=12)
@@ -260,11 +228,11 @@ def plot_event_classification(enso_traj, classifications_array, num_months=None,
     
     # Plot 2: Classification timeline
     color_map = {
-        'Neutral': '#95B8D1',                    # Light blue
-        'Single-year El Nino': '#F4A460',        # Sandy brown
-        'Single-year La Nina': '#4682B4',        # Steel blue
-        'Multi-year El Nino': '#FF6347',         # Tomato red
-        'Multi-year La Nina': '#1E90FF',         # Dodger blue
+        'Neutral': '#D3D3D3',                    # Light grey
+        'Single-year El Nino': "#FF3C3C",        # Light red
+        'Single-year La Nina': "#82A8FF",        # Light blue
+        'Multi-year El Nino': "#B10000",         # Dark red
+        'Multi-year La Nina': "#0065D1",         # Dark blue
     }
     
     # Create color array
@@ -289,7 +257,7 @@ def plot_event_classification(enso_traj, classifications_array, num_months=None,
               bbox_to_anchor=(0.5, -0.3), frameon=True, fontsize=9)
     
     fig.tight_layout()
-    return save_and_log_plot(fig, "07_event_classification", wandb_enabled)
+    return save_and_log_plot(fig, "01_nino3.4_traj", wandb_enabled)
 
 
 def create_evaluation_summary_plots(evaluation_results, wandb_enabled=False):

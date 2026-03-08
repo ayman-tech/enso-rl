@@ -65,7 +65,7 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     
     # Get action_scale from config (single source of truth)
     env_config = EnvConfig()
-    action_scale = np.array(env_config.action_scale)
+    action_scale_matrix = np.array(env_config.action_scale)  # shape: (9, 12)
     
     simulation_data = []
     obs, _ = env.reset(seed=seed)
@@ -89,7 +89,9 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         if disable_control_for_idx is not None:
             action[disable_control_for_idx] = 0.0
         
-        # Store scaled actions for consistent analysis
+        # Store scaled actions for consistent analysis (use current month's scale)
+        current_month = step % 12
+        action_scale = action_scale_matrix[:, current_month]
         scaled_action = action * action_scale
         actions_history.append(scaled_action)
         
@@ -101,7 +103,7 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     end_time = time.perf_counter()
     elapsed = end_time - start_time
     
-    classified_event_array = classify_enso_event(sim_enso_history)
+    classified_event_array = classify_enso_event(sim_enso_history, threshold=env.threshold)
     classified_event = summarize_classification(classified_event_array)
     avg_reward = total_rewards / num_months
     
@@ -112,7 +114,7 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
 
     simulation_data = {
         'no_months': len(sim_enso_history) - 1,
-        'enso_traj': np.array(sim_enso_history),
+        'enso_traj': np.array(sim_enso_history), # 3 month mean of xro simulates nino
         'actions_traj': np.array(actions_history),
         'states_traj': np.array(states_history),
         'classified_event': classified_event,  # Summary string

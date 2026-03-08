@@ -25,7 +25,7 @@ def max_run_length(binary_sequence):
     return (ends - starts).max()
 
 
-def classify_enso_event(enso_history, threshold=1.0, min_duration=24):
+def classify_enso_event(enso_history, threshold=0.5, min_duration=24):
     """
     Classifies each month in ENSO history into different event types.
     

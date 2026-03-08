@@ -1,9 +1,9 @@
 """
 Main training script for ENSO RL agent.
 
-Usage:
-    python scripts/train.py --debug
-    python scripts/train.py --epochs 100 --lr 0.0001
+Usage (normal and Full customizable run):
+    python scripts/train.py --epochs 1000 --name "ppo-train"
+    python scripts/train.py --epochs 1000 --name "ppo-train" --lr 0.0001 --no-wandb --debug
 """
 import sys
 import io
@@ -100,7 +100,6 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
     }
     
     wandb.config.update(hyperparameters)
-    wandb.log({"training_config": hyperparameters})
     print(f"\t[OK] W&B initialized")
     print(f"\t[OK] View experiment at: {wandb.run.url}")
 
@@ -137,7 +136,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig):
             env=env,
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
-            gamma=0.995,
+            gamma=0.99,
             verbose=1
         )
         
@@ -254,6 +253,7 @@ def main():
         wandb_config.mode = "disabled"
     if args.name:
         wandb_config.name = args.name
+        train_config.model_save_path = "models/"+args.name
     
     print("\n")
     print("-"*20 + "ENSO RL AGENT TRAINING PIPELINE" + "-"*20)

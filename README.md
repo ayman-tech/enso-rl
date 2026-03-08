@@ -183,7 +183,7 @@ All configurations are defined in the `config/` directory as Python dataclasses.
 ### Environment Configuration (`config/env_config.py`)
 
 ```python
-threshold = 1.0                  # ENSO event threshold magnitude
+threshold = 0.5                  # ENSO event threshold magnitude (ONI standard)
 action_scale = [0.15, ...]      # Scaling factors for each control variable
 max_steps = None                # None = continuous (no episode resets)
 ```

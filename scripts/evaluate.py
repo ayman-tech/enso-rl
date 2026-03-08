@@ -1,10 +1,16 @@
 """
 Evaluation script for trained ENSO RL agent.
+- Basic for With RL vs without RL
+- Trajectory for plotting traj
+- intervention for ablation study results
 
 Usage:
-    python scripts/evaluate.py --model ppo_enso_model.zip
-    python scripts/evaluate.py --model model.zip --intervention --disable-idx 0
-    python scripts/evaluate.py --model model.zip --trajectory --months 2400
+    python scripts/evaluate.py --model ppo_enso_model
+    python scripts/evaluate.py --model model --intervention --months 2400
+    python scripts/evaluate.py --model model --all --no-wandb
+    python scripts/evaluate.py --model model --basic
+    python scripts/evaluate.py --model model --intervention
+    python scripts/evaluate.py --model model --trajectory
 """
 import sys
 import argparse
@@ -26,8 +32,8 @@ from config import EnvConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.evaluation import evaluate_agent, simulate_trajectory
 from utils.visualization import (
-    plot_enso_trajectory, plot_control_actions, plot_state_variables,
-    plot_feature_importance, plot_robust_interventional, plot_event_classification,
+    plot_control_actions, plot_state_variables,
+    plot_robust_interventional, plot_nino_classification,
     plot_action_kde_by_event, plot_state_kde_by_event
 )
 from utils.enso_table import (
@@ -305,7 +311,7 @@ def run_interventional_analysis(model, env, var_names, disable_idx=None, num_mon
     return delta_r_values
 
 
-def run_trajectory_analysis(model, env, var_names, num_months=240, wandb_enabled=False):
+def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5, wandb_enabled=False):
     """
     Run trajectory analysis and visualization.
     
@@ -314,6 +320,7 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, wandb_enabled
         env: Environment
         var_names (list): Variable names
         num_months (int): Duration of simulation
+        threshold (float): ENSO event threshold from env_config
         wandb_enabled (bool): Whether W&B is enabled
         
     Returns:
@@ -326,7 +333,9 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, wandb_enabled
     print(f"\nSimulating {num_months} months ({num_months/12:.1f} years) of continuous control...")
     
     sim = simulate_trajectory(
-        env, agent=model, num_months=num_months,
+        env, 
+        agent=model, 
+        num_months=num_months,
         debug_mode=True
     )
     
@@ -371,10 +380,9 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, wandb_enabled
     
     # Generate plots
     print("\nGenerating visualization plots...")
-    plot_enso_trajectory(sim['enso_traj'], threshold=1.0, num_months=num_months, wandb_enabled=wandb_enabled)
     plot_control_actions(sim['actions_traj'], var_names, num_months=num_months, wandb_enabled=wandb_enabled)
-    plot_state_variables(sim['states_traj'][:-1], var_names, threshold=1.0, num_months=num_months, wandb_enabled=wandb_enabled)
-    plot_event_classification(sim['enso_traj'], sim['classified_event_array'], num_months=num_months, wandb_enabled=wandb_enabled)
+    plot_state_variables(sim['states_traj'][:-1], var_names, threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
+    plot_nino_classification(sim['enso_traj'], sim['classified_event_array'], threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
     
     # Generate KDE plots by event type
     print("Generating KDE plots by event type...")
@@ -385,10 +393,10 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, wandb_enabled
     
     # Generate ENSO table with colors
     print("\nGenerating ENSO index table...")
-    save_enso_table_html(sim['enso_traj'], output_path="plots/enso_table.html", threshold=1.0, wandb_enabled=wandb_enabled)
-    save_enso_table_matplotlib(sim['enso_traj'], output_path="plots/enso_table.png", threshold=1.0, wandb_enabled=wandb_enabled)
+    save_enso_table_html(sim['enso_traj'], output_path="plots/enso_table.html", threshold=threshold, wandb_enabled=wandb_enabled)
+    save_enso_table_matplotlib(sim['enso_traj'], output_path="plots/enso_table.png", threshold=threshold, wandb_enabled=wandb_enabled)
     if wandb_enabled:
-        log_enso_table_wandb(sim['enso_traj'], threshold=1.0)
+        log_enso_table_wandb(sim['enso_traj'], threshold=threshold)
     
     print("[OK] ENSO table saved as HTML and PNG")
     print("     → Open plots/enso_table.html in your browser for interactive table")
@@ -409,6 +417,7 @@ def main():
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
     parser.add_argument("--n-runs", type=int, default=30, help="Number of paired trials for interventional analysis")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     args = parser.parse_args()
     
     # Set to run all if none specified
@@ -420,12 +429,38 @@ def main():
     
     try:
         suppress_warnings()
+        
+        # Initialize W&B flag early (before any code that might fail)
+        wandb_enabled = not args.no_wandb
+        
         # Load environment
         env_config = EnvConfig()
         model, env, var_names = load_environment(args.model, env_config)
         
-        # Check if W&B is enabled
-        wandb_enabled = wandb.run is not None
+        # Initialize W&B (enabled by default)
+        wandb_enabled = not args.no_wandb
+        if wandb_enabled:
+            from config import WandbConfig
+            from datetime import datetime
+            wandb_config = WandbConfig()
+            run_name = datetime.now().strftime(r"%H:%M %d-%m-%y")
+            wandb.init(
+                project=wandb_config.project,
+                entity=wandb_config.entity,
+                name=run_name,
+                tags=["evaluation", "enso", "ppo"],
+                group="eval",
+                job_type="evaluation",
+            )
+            wandb.config.update({
+                "model_path": args.model,
+                "months": args.months,
+                "n_runs": args.n_runs,
+                "master_seed": args.master_seed,
+            })
+            print(f"[OK] W&B initialized — {wandb.run.url}")
+        else:
+            print("[INFO] W&B logging disabled (--no-wandb)")
         
         # Run evaluations
         if args.all or args.basic:
@@ -437,7 +472,11 @@ def main():
                                         wandb_enabled=wandb_enabled)
         
         if args.all or args.trajectory:
-            run_trajectory_analysis(model, env, var_names, num_months=args.months, wandb_enabled=wandb_enabled)
+            run_trajectory_analysis(model, env, var_names, num_months=args.months, threshold=env_config.threshold, wandb_enabled=wandb_enabled)
+        
+        # Finish W&B run
+        if wandb_enabled and wandb.run is not None:
+            wandb.finish()
         
         print("-"*20 + "EVALUATION PIPELINE COMPLETED" + "-"*20)
         
@@ -445,6 +484,8 @@ def main():
         print(f"\n[ERROR] Evaluation failed: {e}")
         import traceback
         traceback.print_exc()
+        if wandb_enabled and wandb.run is not None:
+            wandb.finish(exit_code=1)
 
 
 if __name__ == "__main__":

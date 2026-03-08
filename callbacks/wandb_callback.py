@@ -33,14 +33,14 @@ class WandbCallback(BaseCallback):
             log_dict = {}
             
             # Basic timestep info
-            log_dict['timesteps'] = self.num_timesteps
+            log_dict['train/timesteps'] = self.num_timesteps
             
             # Episode info
             if hasattr(self.model, 'ep_info_buffer') and len(self.model.ep_info_buffer) > 0:
                 latest_ep = self.model.ep_info_buffer[-1]
-                log_dict['episode_reward'] = latest_ep.get('r', 0)
-                log_dict['episode_length'] = latest_ep.get('l', 0)
-                log_dict['episodes'] = len(self.model.ep_info_buffer)
+                log_dict['train/episode_reward'] = latest_ep.get('r', 0)
+                log_dict['train/episode_length'] = latest_ep.get('l', 0)
+                log_dict['train/episodes'] = len(self.model.ep_info_buffer)
             
             # Model logger metrics
             if hasattr(self.model, 'logger') and self.model.logger is not None:
@@ -56,7 +56,7 @@ class WandbCallback(BaseCallback):
             if hasattr(self.model, 'start_time') and self.model.start_time:
                 elapsed = time.time() - self.model.start_time
                 if elapsed > 0:
-                    log_dict['fps'] = int(self.num_timesteps / elapsed)
+                    log_dict['train/fps'] = int(self.num_timesteps / elapsed)
             
             # Log if we have data
             if len(log_dict) > 1:

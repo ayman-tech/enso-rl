@@ -32,9 +32,9 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
 
     var_names = params['var_names']
     bounds = params.get('bounds', {})
-    action_scale = params.get('action_scale', [1.8, 0.4, 0.3, 0.3, 0.7, 0.4, 0.35, 0.6, 0.4])
-    action_scale = [x / 12 for x in action_scale]  # Normalize by 12
-    
+    action_scale_matrix = params.get('action_scale', None)
+    # Monthly action scale: pick the column for the current month
+    action_scale = np.array([row[current_month_idx] for row in action_scale_matrix])
     # 1. Apply Control Action
     control_actions = np.zeros_like(state)
     control_actions = action * action_scale

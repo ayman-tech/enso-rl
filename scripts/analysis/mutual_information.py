@@ -67,7 +67,7 @@ def load_environment(model_path: str, env_config: EnvConfig):
     return model, env, var_names
 
 
-def collect_single_trajectory(env, model, num_months, seed, action_scale):
+def collect_single_trajectory(env, model, num_months, seed, action_scale_matrix):
     """
     Collect actions and Nino3.4 values from a single trajectory.
 
@@ -76,7 +76,7 @@ def collect_single_trajectory(env, model, num_months, seed, action_scale):
         model: Trained PPO model
         num_months: Months to simulate
         seed: Random seed for env.reset()
-        action_scale: Action scaling array [9]
+        action_scale_matrix: Action scaling matrix [9, 12] (variables x months)
 
     Returns:
         actions: [num_months, 9] scaled actions
@@ -90,6 +90,8 @@ def collect_single_trajectory(env, model, num_months, seed, action_scale):
         action, _ = model.predict(obs, deterministic=True)
         obs_next, reward, terminated, truncated, info = env.step(action)
 
+        current_month = step % 12
+        action_scale = action_scale_matrix[:, current_month]
         scaled_action = action * action_scale
         actions.append(scaled_action)
         nino34_vals.append(obs_next[0])  # Nino3.4 is first obs
@@ -99,7 +101,7 @@ def collect_single_trajectory(env, model, num_months, seed, action_scale):
     return np.array(actions), np.array(nino34_vals)
 
 
-def classify_nino34(nino34, threshold=1.0):
+def classify_nino34(nino34, threshold=0.5):
     """
     Classify Nino3.4 into ENSO categories.
 
@@ -161,7 +163,7 @@ def histogram_mutual_information(x, y_discrete, n_bins=20):
     return max(mi, 0.0)
 
 
-def compute_mi_for_trajectory(actions, nino34, lag, threshold=1.0, n_bins=20):
+def compute_mi_for_trajectory(actions, nino34, lag, threshold=0.5, n_bins=20):
     """
     Compute MI between each action dimension and ENSO classification at a future lag.
 
@@ -381,7 +383,7 @@ def main():
     parser.add_argument("--lags", type=int, nargs='+', default=[1, 3, 6, 12, 18, 24],
                         help="Lag values in months")
     parser.add_argument("--n-bins", type=int, default=20, help="Histogram bins for MI")
-    parser.add_argument("--threshold", type=float, default=1.0, help="ENSO class threshold")
+    parser.add_argument("--threshold", type=float, default=0.5, help="ENSO class threshold")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     args = parser.parse_args()
 
@@ -397,7 +399,7 @@ def main():
 
     env_config = EnvConfig()
     model, env, var_names = load_environment(args.model, env_config)
-    action_scale = np.array(env_config.action_scale)
+    action_scale = np.array(env_config.action_scale)  # shape: (9, 12)
     action_names = list(var_names[1:])
     n_actions = len(action_names)
 

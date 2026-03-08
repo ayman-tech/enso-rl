@@ -40,4 +40,6 @@ class WandbConfig:
             "notes": self.notes,
             "tags": self.tags,
             "mode": self.mode,
+            "group": "training",
+            "job_type": "training",
         }

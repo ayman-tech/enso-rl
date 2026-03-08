@@ -6,6 +6,7 @@ models/
 .python-version
 uv.lock
 trajectory_analysis.csv
+*.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
