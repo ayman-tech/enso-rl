@@ -16,6 +16,8 @@ import sys
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import wandb
+from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
 
@@ -24,7 +26,7 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
-from config import EnvConfig
+from config import EnvConfig, WandbConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.enso_classifier import classify_enso_event
 from envs import XROMultiYearEnv
@@ -287,6 +289,13 @@ def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir
     plt.close(fig2)
     print(f"  Saved {output_dir / 'shapley_values_dist.png'}")
 
+    # Log plots to W&B
+    if wandb.run is not None:
+        wandb.log({
+            "shapley_bar_chart": wandb.Image(str(output_dir / 'shapley_values_bar.png')),
+            "shapley_distribution": wandb.Image(str(output_dir / 'shapley_values_dist.png')),
+        })
+
 
 def main():
     parser = argparse.ArgumentParser(description="Shapley Value Analysis for ENSO RL Agent")
@@ -305,6 +314,25 @@ def main():
 
     output_dir = Path("plots/shapley") / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize W&B
+    wandb_config = WandbConfig()
+    run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
+    wandb.init(
+        project=wandb_config.project,
+        entity=wandb_config.entity,
+        name=run_name,
+        job_type="shapley-analysis",
+        tags=["shapley", "analysis", args.metric],
+        config={
+            "model": args.model,
+            "months": args.months,
+            "n_runs": args.n_runs,
+            "n_permutations": args.n_permutations,
+            "metric": args.metric,
+            "master_seed": args.master_seed,
+        },
+    )
 
     print("=" * 70)
     print("SHAPLEY VALUE ANALYSIS FOR ENSO RL AGENT")
@@ -330,8 +358,6 @@ def main():
     # Compute per-run Shapley values
     shapley_per_run = np.zeros((args.n_runs, n_actions))
 
-    # n_runs * n_permutations * num_months
-
     for run_idx, seed in enumerate(shared_seeds):
         print(f"--- Run {run_idx+1}/{args.n_runs} (seed={seed}) ---")
         sv, marginals = compute_shapley_for_seed(
@@ -341,6 +367,11 @@ def main():
 
         top_idx = np.argmax(np.abs(sv))
         print(f"  Top driver this run: {action_names[top_idx]} (SV={sv[top_idx]:+.6f})\n")
+
+        # Log per-run Shapley values to W&B
+        run_log = {f"shapley/{name}": sv[i] for i, name in enumerate(action_names)}
+        run_log["run_idx"] = run_idx
+        wandb.log(run_log)
 
     # Statistical analysis
     stats = compute_statistics(shapley_per_run, action_names)
@@ -361,6 +392,21 @@ def main():
     print("(Should ≈ V(all actions) - V(no actions))")
     print(f"\nSignificance: *** p<0.001, ** p<0.01, * p<0.05, ns = not significant")
 
+    # Log summary statistics to W&B
+    summary_table = wandb.Table(
+        columns=["Feature", "Mean SV", "Std", "CI Low", "CI High", "p-value", "Significance"],
+        data=[
+            [
+                s['feature'], s['mean'], s['std'],
+                s['mean'] - s['ci_95'], s['mean'] + s['ci_95'],
+                s['p_value'],
+                "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
+            ]
+            for s in sorted(stats, key=lambda x: abs(x['mean']), reverse=True)
+        ]
+    )
+    wandb.log({"shapley_summary": summary_table})
+
     # Save
     np.savez(
         output_dir / 'shapley_results.npz',
@@ -377,6 +423,8 @@ def main():
     # Plot
     print("\nGenerating plots...")
     plot_shapley_values(stats, shapley_per_run, action_names, args.n_runs, output_dir, metric=args.metric)
+
+    wandb.finish()
 
     print(f"\n{'=' * 70}")
     print("SHAPLEY ANALYSIS COMPLETE")

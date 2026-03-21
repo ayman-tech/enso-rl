@@ -37,27 +37,72 @@ def create_enso_table(enso_traj, threshold=0.5):
     return df_enso
 
 
+def _find_peak_positions(df_enso, threshold=0.5):
+    """
+    Find (row, col) positions of peak values within each continuous ENSO run.
+
+    Returns:
+        set: Set of (row_idx, col_idx) tuples marking peak positions
+    """
+    flat = df_enso.values.flatten()
+    n = len(flat)
+    peaks = set()
+
+    # Find El Niño peaks (max within each run above threshold)
+    i = 0
+    while i < n:
+        if flat[i] > threshold:
+            start = i
+            while i < n and flat[i] > threshold:
+                i += 1
+            peak_idx = start + np.argmax(flat[start:i])
+            peaks.add(divmod(peak_idx, df_enso.shape[1]))
+        else:
+            i += 1
+
+    # Find La Niña peaks (min within each run below -threshold)
+    i = 0
+    while i < n:
+        if flat[i] < -threshold:
+            start = i
+            while i < n and flat[i] < -threshold:
+                i += 1
+            peak_idx = start + np.argmin(flat[start:i])
+            peaks.add(divmod(peak_idx, df_enso.shape[1]))
+        else:
+            i += 1
+
+    return peaks
+
+
 def style_enso_table(df_enso, threshold=0.5):
     """
-    Apply styling to ENSO table.
-    
+    Apply styling to ENSO table. Peak values in each El Niño/La Niña run are bolded.
+
     Args:
         df_enso (pd.DataFrame): ENSO dataframe
         threshold (float): Threshold for coloring
-        
+
     Returns:
         pd.io.formats.style.Styler: Styled dataframe
     """
-    def color_cells(val):
-        """Color cells based on ENSO value."""
-        if val > threshold:
-            return 'background-color: #FFB3B3; color: red; font-weight: bold'  # Light red
-        elif val < -threshold:
-            return 'background-color: #B3D9FF; color: blue; font-weight: bold'  # Light blue
-        else:
-            return 'background-color: #E8E8E8; color: black'  # Light gray
-    
-    styler = df_enso.style.format("{:.2f}").map(color_cells)
+    peaks = _find_peak_positions(df_enso, threshold)
+
+    def style_func(df):
+        styles = pd.DataFrame('', index=df.index, columns=df.columns)
+        for i in range(len(df)):
+            for j in range(len(df.columns)):
+                val = df.iloc[i, j]
+                bold = 'font-weight: bold' if (i, j) in peaks else 'font-weight: normal'
+                if val > threshold:
+                    styles.iloc[i, j] = f'background-color: #FFB3B3; color: red; {bold}'
+                elif val < -threshold:
+                    styles.iloc[i, j] = f'background-color: #B3D9FF; color: blue; {bold}'
+                else:
+                    styles.iloc[i, j] = f'background-color: #E8E8E8; color: black; {bold}'
+        return styles
+
+    styler = df_enso.style.format("{:.2f}").apply(style_func, axis=None)
     return styler
 
 
@@ -157,21 +202,24 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     table.set_fontsize(9)
     table.scale(1, 2)
     
-    # Color the cells
+    # Color the cells, bold only peaks
+    peaks = _find_peak_positions(df_enso, threshold)
     for i in range(len(df_enso)):
         for j in range(len(df_enso.columns)):
             val = df_enso.iloc[i, j]
             cell = table[(i+1, j)]
-            
+            is_peak = (i, j) in peaks
+            weight = 'bold' if is_peak else 'normal'
+
             if val > threshold:
-                cell.set_facecolor('#FFB3B3')  # Light red
-                cell.set_text_props(weight='bold', color='red')
+                cell.set_facecolor('#FFB3B3')
+                cell.set_text_props(weight=weight, color='red')
             elif val < -threshold:
-                cell.set_facecolor('#B3D9FF')  # Light blue
-                cell.set_text_props(weight='bold', color='blue')
+                cell.set_facecolor('#B3D9FF')
+                cell.set_text_props(weight=weight, color='blue')
             else:
-                cell.set_facecolor('#E8E8E8')  # Light gray
-            
+                cell.set_facecolor('#E8E8E8')
+
             cell.set_text_props(ha='center', va='center')
     
     # Style header

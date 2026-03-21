@@ -15,14 +15,16 @@ import sys
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import wandb
+from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
 
-repo_root = Path(__file__).parent.parent
+repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
-from config import EnvConfig
+from config import EnvConfig, WandbConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.enso_classifier import classify_enso_event
 from envs import XROMultiYearEnv
@@ -347,6 +349,13 @@ def plot_comparison(stats, n_runs, output_dir):
     plt.close(fig2)
     print(f"  Saved {output_dir / 'counterfactual_scatter.png'}")
 
+    # Log plots to W&B
+    if wandb.run is not None:
+        wandb.log({
+            "counterfactual_comparison": wandb.Image(str(output_dir / 'counterfactual_comparison.png')),
+            "counterfactual_scatter": wandb.Image(str(output_dir / 'counterfactual_scatter.png')),
+        })
+
 
 def main():
     parser = argparse.ArgumentParser(description="Counterfactual Trajectory Analysis")
@@ -361,6 +370,23 @@ def main():
 
     output_dir = Path("plots/counterfactual")
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize W&B
+    wandb_config = WandbConfig()
+    run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
+    wandb.init(
+        project=wandb_config.project,
+        entity=wandb_config.entity,
+        name=run_name,
+        job_type="counterfactual-analysis",
+        tags=["counterfactual", "analysis", "ablation"],
+        config={
+            "model": args.model,
+            "months": args.months,
+            "n_runs": args.n_runs,
+            "master_seed": args.seed,
+        },
+    )
 
     print("=" * 70)
     print("COUNTERFACTUAL TRAJECTORY ANALYSIS")
@@ -377,6 +403,9 @@ def main():
     print("  Mean action vector:")
     for i, name in enumerate(controllable_vars):
         print(f"    {name:<10}: {mean_actions[i]:+.4f}")
+
+    # Log mean actions to W&B
+    wandb.log({f"mean_action/{name}": float(mean_actions[i]) for i, name in enumerate(controllable_vars)})
 
     # Step 2: Run paired analysis
     print(f"\nStep 2: Running paired analysis ({args.n_runs} runs × {1 + 2*9} conditions = {args.n_runs * 19} sims)...")
@@ -401,12 +430,31 @@ def main():
         sig_z = "***" if s['p_zero'] < 0.001 else "**" if s['p_zero'] < 0.01 else "*" if s['p_zero'] < 0.05 else "ns"
         print(f"{s['feature']:<10} | {s['dr_mean_clamp']:>+10.4f} {s['ci_clamp']:>8.4f} {s['p_clamp']:>8.4f} {sig_c:>5} | {s['dr_zero']:>+10.4f} {s['ci_zero']:>8.4f} {s['p_zero']:>8.4f} {sig_z:>5}")
 
+    # Log summary table to W&B
+    summary_table = wandb.Table(
+        columns=["Feature", "Clamp ΔR", "Clamp CI", "Clamp p-value", "Clamp Sig",
+                 "Zero ΔR", "Zero CI", "Zero p-value", "Zero Sig"],
+        data=[
+            [
+                s['feature'],
+                s['dr_mean_clamp'], s['ci_clamp'], s['p_clamp'],
+                "***" if s['p_clamp'] < 0.001 else "**" if s['p_clamp'] < 0.01 else "*" if s['p_clamp'] < 0.05 else "ns",
+                s['dr_zero'], s['ci_zero'], s['p_zero'],
+                "***" if s['p_zero'] < 0.001 else "**" if s['p_zero'] < 0.01 else "*" if s['p_zero'] < 0.05 else "ns",
+            ]
+            for s in sorted(stats, key=lambda x: abs(x['dr_mean_clamp']), reverse=True)
+        ]
+    )
+    wandb.log({"counterfactual_summary": summary_table})
+
     # Agreement check
     from scipy.stats import spearmanr
     clamp_ranks = [s['dr_mean_clamp'] for s in stats]
     zero_ranks = [s['dr_zero'] for s in stats]
     rho, pval = spearmanr(clamp_ranks, zero_ranks)
     print(f"\nRank correlation (Spearman) between methods: ρ = {rho:.3f}, p = {pval:.4f}")
+
+    wandb.log({"spearman_rho": rho, "spearman_p": pval})
 
     # Save
     np.savez(
@@ -422,6 +470,8 @@ def main():
     # Plot
     print("\nGenerating plots...")
     plot_comparison(stats, args.n_runs, output_dir)
+
+    wandb.finish()
 
     print(f"\n{'='*70}")
     print("COUNTERFACTUAL ANALYSIS COMPLETE")
