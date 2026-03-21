@@ -25,15 +25,15 @@ def max_run_length(binary_sequence):
     return (ends - starts).max()
 
 
-def classify_enso_event(enso_history, threshold=0.5, min_duration=24):
+def classify_enso_event(enso_history, threshold=0.5, min_duration=12):
     """
     Classifies each month in ENSO history into different event types.
-    
+
     Args:
         enso_history (list or np.ndarray): List/array of ENSO index values over time
         threshold (float): Magnitude threshold for El Nino/La Nina
-        min_duration (int): Minimum months for multi-year event
-        
+        min_duration (int): Minimum months for multi-year event (>min_duration = multi-year)
+
     Returns:
         np.ndarray: Array of classifications for each month
                    ('Neutral', 'Single-year El Nino', 'Single-year La Nina',
@@ -41,30 +41,30 @@ def classify_enso_event(enso_history, threshold=0.5, min_duration=24):
     """
     enso_history = np.array(enso_history)
     n_months = len(enso_history)
-    
+
     # Initialize all as neutral
     classifications = np.array(['Neutral'] * n_months, dtype=object)
-    
+
     # Identify El Niño and La Niña periods
     is_nino = (enso_history >= threshold).astype(int)
     is_nina = (enso_history <= -threshold).astype(int)
-    
+
     # Find continuous runs for El Niño
     nino_runs = _find_continuous_runs(is_nino)
     for start, end, length in nino_runs:
-        if length >= min_duration:
+        if length > min_duration:
             classifications[start:end+1] = 'Multi-year El Nino'
-        elif length >= 12:
+        elif length >= 6:
             classifications[start:end+1] = 'Single-year El Nino'
-    
+
     # Find continuous runs for La Niña
     nina_runs = _find_continuous_runs(is_nina)
     for start, end, length in nina_runs:
-        if length >= min_duration:
+        if length > min_duration:
             classifications[start:end+1] = 'Multi-year La Nina'
-        elif length >= 12:
+        elif length >= 6:
             classifications[start:end+1] = 'Single-year La Nina'
-    
+
     return classifications
 
 

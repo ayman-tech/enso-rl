@@ -33,7 +33,7 @@ def evaluate_agent(env, agent=None, continuous_steps=6000):
         enso_history.append(obs[0])
     
     # Classify events and calculate multi-year probability
-    classified = classify_enso_event(enso_history, threshold=env.threshold, min_duration=24)
+    classified = classify_enso_event(enso_history, threshold=env.threshold, min_duration=12)
     mye_months = np.sum((classified == 'Multi-year El Nino') | (classified == 'Multi-year La Nina'))
     mye_probability = mye_months / len(classified)
     

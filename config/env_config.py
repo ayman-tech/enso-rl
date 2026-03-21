@@ -35,6 +35,27 @@ class EnvConfig:
         # SASD
         [0.3412, 0.3235, 0.3208, 0.2567, 0.1933, 0.1749, 0.1943, 0.1585, 0.1343, 0.2089, 0.2865, 0.3701],
     ])
+    # Action scaling factors per variable per month (median absolute change from observational data)
+    action_scale_median: list = field(default_factory=lambda: [
+        # WWV
+        [1.9820, 1.3861, 1.4365, 1.4435, 1.1293, 1.3021, 1.2335, 0.7784, 1.1000, 0.9740, 1.2712, 1.6017],
+        # NPMM
+        [0.1262, 0.1126, 0.0976, 0.1285, 0.1147, 0.1225, 0.1014, 0.0820, 0.0928, 0.0907, 0.1095, 0.1490],
+        # SPMM
+        [0.2168, 0.1650, 0.1794, 0.1764, 0.1657, 0.1171, 0.0934, 0.0821, 0.0902, 0.1185, 0.1311, 0.2426],
+        # IOB
+        [0.1031, 0.0813, 0.1105, 0.0754, 0.1039, 0.1208, 0.0870, 0.0663, 0.0661, 0.0689, 0.0809, 0.0859],
+        # IOD
+        [0.1864, 0.2267, 0.2025, 0.1894, 0.1998, 0.1725, 0.1931, 0.1801, 0.1756, 0.1566, 0.1679, 0.2084],
+        # SIOD
+        [0.1289, 0.1704, 0.1384, 0.1324, 0.1384, 0.1812, 0.1440, 0.1053, 0.1159, 0.1419, 0.1498, 0.1769],
+        # TNA
+        [0.1568, 0.1472, 0.1733, 0.1072, 0.1209, 0.1000, 0.1164, 0.0929, 0.0869, 0.0845, 0.1119, 0.0822],
+        # ATL3
+        [0.0961, 0.1054, 0.1682, 0.1323, 0.1564, 0.2769, 0.2219, 0.1911, 0.1555, 0.1575, 0.1267, 0.1622],
+        # SASD
+        [0.2482, 0.2678, 0.2373, 0.2033, 0.1483, 0.1462, 0.1647, 0.1318, 0.1185, 0.1810, 0.2137, 0.3544],
+    ])
     
     # Observation space dimension
     obs_dim: int = 11  # 10 variables + 1 month feature
@@ -45,20 +66,14 @@ class EnvConfig:
     # Maximum steps for environment (None = continuous)
     max_steps: Optional[int] = None
     
-    # Reward structure parameters
+    # Reward structure parameters (matches _calculate_reward in xro_env.py)
     reward_config: Dict = field(default_factory=lambda: {
-        "enso_reward": 0.1,
-        "action_penalty_weight": 0.01,
-        "multi_year_event_reward": 0.5,
-        "min_duration_multi_year": 24,  # months
-        "duration_reward_threshold_6m": 0.10,
-        "duration_reward_threshold_12m": 0.15,
-        "duration_reward_threshold_18m": 0.25,
-        "duration_reward_threshold_24m": 0.30,
-        "duration_penalty_start": 30,  # months
-        "duration_penalty_rate": 0.01,
-        "duration_penalty_steeper_start": 36,  # months
-        "duration_penalty_steeper_rate": 0.02,
+        "action_penalty_weight": 0.002,
+        "duration_reward_0_6m": 0.1,
+        "duration_reward_7_12m": 0.3,
+        "duration_reward_13_24m": 1.0,
+        "duration_penalty_start": 24,  # months
+        "duration_penalty_rate": 0.3,  # per month beyond 24
     })
     
     # Data configuration

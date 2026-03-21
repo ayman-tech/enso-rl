@@ -7,7 +7,10 @@ for statistical robustness with t-tests, 95% CIs, and significance testing.
 
 Usage:
     python scripts/shapley_analysis.py --model rl_model
-    python scripts/shapley_analysis.py --model rl_model --n-runs 30 --n-permutations 20
+    python scripts/shapley_analysis.py --model rl_model --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
+Params meaning :
+    n-runs: No of independent seeded simulation runs for statistical robustness (each produces one set of Shapley values; used for t-tests and confidence intervals).
+    n-permutations: No of random action orderings sampled/run to approximate the Shapley values (more = better approximation of the combinatorial sum).
 """
 import sys
 import argparse
@@ -17,15 +20,48 @@ from pathlib import Path
 from scipy import stats as sp_stats
 
 # Add repo root to path
-repo_root = Path(__file__).parent.parent
+repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
 from config import EnvConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
+from utils.enso_classifier import classify_enso_event
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
 from XRO.core import XRO
+
+METRIC_LABELS = {
+    'mye_prob': 'MYE Probability',
+    'enso_months': 'Total ENSO Months',
+    'avg_reward': 'Average Reward',
+}
+
+
+def compute_metric_from_trajectory(enso_history, threshold, metric):
+    """Compute a scalar metric from an ENSO trajectory.
+
+    Args:
+        enso_history: List/array of Nino3.4 values
+        threshold: ENSO event threshold
+        metric: One of 'mye_prob', 'enso_months'
+
+    Returns:
+        float: Metric value
+    """
+    enso = np.array(enso_history)
+
+    if metric == 'mye_prob':
+        classified = classify_enso_event(enso, threshold=threshold)
+        mye_months = np.sum(
+            (classified == 'Multi-year El Nino') | (classified == 'Multi-year La Nina')
+        )
+        return mye_months / len(classified)
+
+    elif metric == 'enso_months':
+        return float(np.sum(np.abs(enso) >= threshold))
+
+    raise ValueError(f"Unknown metric: {metric}")
 
 
 def load_environment(model_path: str, env_config: EnvConfig):
@@ -59,7 +95,7 @@ def load_environment(model_path: str, env_config: EnvConfig):
     return model, env, var_names
 
 
-def simulate_with_coalition(env, model, coalition_mask, num_months, seed):
+def simulate_with_coalition(env, model, coalition_mask, num_months, seed, metric):
     """
     Simulate with only a subset of actions active.
     Actions outside the coalition are clamped to zero.
@@ -70,23 +106,29 @@ def simulate_with_coalition(env, model, coalition_mask, num_months, seed):
         coalition_mask: Boolean array [9]. True = action active.
         num_months: Simulation duration
         seed: Random seed for env.reset()
+        metric: Value function - 'mye_prob', 'enso_months', or 'avg_reward'
 
     Returns:
-        float: Average reward from the simulation
+        float: Metric value from the simulation
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
+    enso_history = [float(obs[0])]
 
     for step in range(num_months):
         action, _ = model.predict(obs, deterministic=True)
         action = action * coalition_mask.astype(np.float32)
         obs, reward, terminated, truncated, _ = env.step(action)
         total_reward += reward
+        enso_history.append(float(obs[0]))
 
-    return total_reward / num_months
+    if metric == 'avg_reward':
+        return total_reward / num_months
+
+    return compute_metric_from_trajectory(enso_history, env.threshold, metric)
 
 
-def compute_shapley_for_seed(env, model, num_months, n_permutations, seed):
+def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metric='avg_reward'):
     """
     Compute Shapley values for a single seed via permutation sampling.
 
@@ -96,6 +138,7 @@ def compute_shapley_for_seed(env, model, num_months, n_permutations, seed):
         num_months: Months per simulation
         n_permutations: Number of random permutations
         seed: Seed for env.reset() (shared across all coalition evaluations)
+        metric: Value function metric
 
     Returns:
         np.ndarray: Shapley values for this seed [9]
@@ -110,7 +153,7 @@ def compute_shapley_for_seed(env, model, num_months, n_permutations, seed):
         prev_value = simulate_with_coalition(
             env, model,
             coalition_mask=np.zeros(n_actions, dtype=bool),
-            num_months=num_months, seed=seed
+            num_months=num_months, seed=seed, metric=metric
         )
 
         for pos in range(n_actions):
@@ -120,7 +163,7 @@ def compute_shapley_for_seed(env, model, num_months, n_permutations, seed):
 
             current_value = simulate_with_coalition(
                 env, model, coalition_mask=coalition,
-                num_months=num_months, seed=seed
+                num_months=num_months, seed=seed, metric=metric
             )
             all_marginals[perm_idx, feature_idx] = current_value - prev_value
             prev_value = current_value
@@ -165,8 +208,9 @@ def compute_statistics(shapley_per_run, action_names):
     return stats
 
 
-def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir):
+def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir, metric='mye_prob'):
     """Generate Shapley value plots with significance annotations."""
+    metric_label = METRIC_LABELS.get(metric, metric)
 
     # Sort by absolute mean Shapley value
     sorted_idx = np.argsort([abs(s['mean']) for s in stats])[::-1]
@@ -206,7 +250,7 @@ def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir
     ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
     ax.set_xlabel('Action Variable', fontsize=13)
     ax.set_ylabel(f'Mean Shapley Value ± 95% CI (N={n_runs})', fontsize=13)
-    ax.set_title('Shapley Value Analysis: Action Importance for ENSO Control', fontsize=15)
+    ax.set_title(f'Shapley Analysis: Action Importance — {metric_label}', fontsize=15)
     ax.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
     ax.grid(axis='y', alpha=0.3)
 
@@ -235,7 +279,7 @@ def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir
     ax2.axhline(0, color='gray', linestyle='--', linewidth=0.8)
     ax2.set_xlabel('Action Variable', fontsize=13)
     ax2.set_ylabel(f'Shapley Value (N={n_runs} independent runs)', fontsize=13)
-    ax2.set_title('Distribution of Shapley Values Across Runs', fontsize=15)
+    ax2.set_title(f'Distribution of Shapley Values — {metric_label}', fontsize=15)
     ax2.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
     ax2.grid(axis='y', alpha=0.3)
     fig2.tight_layout()
@@ -250,13 +294,16 @@ def main():
     parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
     parser.add_argument("--n-runs", type=int, default=30, help="Number of independent seeds (paired trials)")
     parser.add_argument("--n-permutations", type=int, default=20, help="Permutations per run")
+    parser.add_argument("--metric", type=str, default="avg_reward",
+                        choices=["mye_prob", "enso_months", "avg_reward"],
+                        help="Value function for Shapley analysis (default: avg_reward)")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     args = parser.parse_args()
 
     suppress_warnings()
     np.random.seed(args.master_seed)
 
-    output_dir = Path("plots/shapley")
+    output_dir = Path("plots/shapley") / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
@@ -275,6 +322,7 @@ def main():
     total_sims = args.n_runs * args.n_permutations * (n_actions + 1)
     print(f"\n  N_RUNS          = {args.n_runs}")
     print(f"  N_PERMUTATIONS  = {args.n_permutations}")
+    print(f"  METRIC          = {args.metric} ({METRIC_LABELS[args.metric]})")
     print(f"  SIM_MONTHS      = {args.months} ({args.months // 12} years)")
     print(f"  Total sims      = {total_sims}")
     print(f"{'=' * 70}\n")
@@ -282,10 +330,12 @@ def main():
     # Compute per-run Shapley values
     shapley_per_run = np.zeros((args.n_runs, n_actions))
 
+    # n_runs * n_permutations * num_months
+
     for run_idx, seed in enumerate(shared_seeds):
         print(f"--- Run {run_idx+1}/{args.n_runs} (seed={seed}) ---")
         sv, marginals = compute_shapley_for_seed(
-            env, model, args.months, args.n_permutations, seed
+            env, model, args.months, args.n_permutations, seed, metric=args.metric
         )
         shapley_per_run[run_idx] = sv
 
@@ -319,13 +369,14 @@ def main():
         n_runs=args.n_runs,
         n_permutations=args.n_permutations,
         months=args.months,
+        metric=args.metric,
         seeds=shared_seeds,
     )
     print(f"\nResults saved to {output_dir / 'shapley_results.npz'}")
 
     # Plot
     print("\nGenerating plots...")
-    plot_shapley_values(stats, shapley_per_run, action_names, args.n_runs, output_dir)
+    plot_shapley_values(stats, shapley_per_run, action_names, args.n_runs, output_dir, metric=args.metric)
 
     print(f"\n{'=' * 70}")
     print("SHAPLEY ANALYSIS COMPLETE")

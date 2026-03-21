@@ -119,17 +119,15 @@ def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", thresho
     return output_path
 
 
-def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", threshold=0.5,
-                               wandb_enabled=False):
+def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", threshold=0.5):
     """
     Save ENSO table as a PNG image using matplotlib.
-    
+
     Args:
         enso_traj (array): ENSO time series (already ONI)
         output_path (str): Path to save PNG file
         threshold (float): Threshold for coloring
-        wandb_enabled (bool): Log to W&B
-        
+
     Returns:
         str: Path to saved file
     """
@@ -201,16 +199,13 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     
-    if wandb_enabled and wandb.run is not None:
-        wandb.log({f"enso_table_image": wandb.Image(output_path)})
-    
     return output_path
 
 
 def log_enso_table_wandb(enso_traj, threshold=0.5):
     """
-    Log ENSO table directly to W&B as a formatted table.
-    
+    Log styled ENSO table directly to W&B as rendered HTML.
+
     Args:
         enso_traj (array): ENSO time series (already ONI)
         threshold (float): Threshold for coloring
@@ -218,17 +213,8 @@ def log_enso_table_wandb(enso_traj, threshold=0.5):
     if wandb.run is None:
         print("[WARNING] W&B not initialized. Skipping W&B table logging.")
         return
-    
+
     df_enso = create_enso_table(enso_traj, threshold)
-    
-    # Create W&B table
-    table_data = []
-    for year, row in df_enso.iterrows():
-        row_data = [year] + [f"{val:.2f}" for val in row.values]
-        table_data.append(row_data)
-    
-    columns = ['Year'] + list(df_enso.columns)
-    wandb_table = wandb.Table(data=table_data, columns=columns)
-    
-    wandb.log({"enso_table": wandb_table})
-    print("[OK] ENSO table logged to W&B")
+    styler = style_enso_table(df_enso, threshold)
+    wandb.log({"enso_table": wandb.Html(styler.to_html())})
+    print("[OK] Styled ENSO table logged to W&B")

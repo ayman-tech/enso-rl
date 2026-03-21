@@ -394,7 +394,7 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
     # Generate ENSO table with colors
     print("\nGenerating ENSO index table...")
     save_enso_table_html(sim['enso_traj'], output_path="plots/enso_table.html", threshold=threshold, wandb_enabled=wandb_enabled)
-    save_enso_table_matplotlib(sim['enso_traj'], output_path="plots/enso_table.png", threshold=threshold, wandb_enabled=wandb_enabled)
+    save_enso_table_matplotlib(sim['enso_traj'], output_path="plots/enso_table.png", threshold=threshold)
     if wandb_enabled:
         log_enso_table_wandb(sim['enso_traj'], threshold=threshold)
     
