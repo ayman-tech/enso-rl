@@ -9,6 +9,7 @@ Uses multiprocessing to parallelize across independent seed runs.
 Usage:
     uv run scripts/shapley_analysis.py --model rl_model
     uv run scripts/shapley_analysis.py --model rl_model --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
+    uv run scripts/shapley_analysis.py --model rl_model --no-wandb
 Params meaning :
     n-runs: No of independent seeded simulation runs for statistical robustness (each produces one set of Shapley values; used for t-tests and confidence intervals).
     n-permutations: No of random action orderings sampled/run to approximate the Shapley values (more = better approximation of the combinatorial sum).
@@ -336,6 +337,8 @@ def main():
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     parser.add_argument("--workers", type=int, default=None,
                         help="Number of parallel workers (default: cpu_count - 1)")
+    parser.add_argument("--no-wandb", action="store_true",
+                        help="Disable W&B logging (useful for HPC without internet)")
     args = parser.parse_args()
 
     suppress_warnings()
@@ -345,27 +348,28 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize W&B
-    wandb_config = WandbConfig()
-    run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
-    n_workers = args.workers if args.workers else max(1, cpu_count() - 1)
+    n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
 
-    wandb.init(
-        project=wandb_config.project,
-        entity=wandb_config.entity,
-        name=run_name,
-        job_type="shapley-analysis",
-        group="analysis",
-        tags=["shapley", "analysis", args.metric],
-        config={
-            "model": args.model,
-            "months": args.months,
-            "n_runs": args.n_runs,
-            "n_permutations": args.n_permutations,
-            "metric": args.metric,
-            "master_seed": args.master_seed,
-            "n_workers": n_workers,
-        },
-    )
+    if not args.no_wandb:
+        wandb_config = WandbConfig()
+        run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
+        wandb.init(
+            project=wandb_config.project,
+            entity=wandb_config.entity,
+            name=run_name,
+            job_type="shapley-analysis",
+            group="analysis",
+            tags=["shapley", "analysis", args.metric],
+            config={
+                "model": args.model,
+                "months": args.months,
+                "n_runs": args.n_runs,
+                "n_permutations": args.n_permutations,
+                "metric": args.metric,
+                "master_seed": args.master_seed,
+                "n_workers": n_workers,
+            },
+        )
 
     print("=" * 70)
     print("SHAPLEY VALUE ANALYSIS FOR ENSO RL AGENT")
@@ -391,6 +395,7 @@ def main():
     print(f"  SIM_MONTHS      = {args.months} ({args.months // 12} years)")
     print(f"  Total sims      = {total_sims}")
     print(f"  Workers         = {n_workers}")
+    print(f"  W&B             = {'enabled' if not args.no_wandb else 'disabled'}")
     print(f"{'=' * 70}\n")
 
     # Build worker args
@@ -409,9 +414,10 @@ def main():
         shapley_per_run[run_idx] = sv
 
         # Log per-run Shapley values to W&B
-        run_log = {f"shapley/{name}": sv[i] for i, name in enumerate(action_names)}
-        run_log["run_idx"] = run_idx
-        wandb.log(run_log)
+        if wandb.run is not None:
+            run_log = {f"shapley/{name}": sv[i] for i, name in enumerate(action_names)}
+            run_log["run_idx"] = run_idx
+            wandb.log(run_log)
 
     # Statistical analysis
     stats = compute_statistics(shapley_per_run, action_names)
@@ -433,19 +439,20 @@ def main():
     print(f"\nSignificance: *** p<0.001, ** p<0.01, * p<0.05, ns = not significant")
 
     # Log summary statistics to W&B
-    summary_table = wandb.Table(
-        columns=["Feature", "Mean SV", "Std", "CI Low", "CI High", "p-value", "Significance"],
-        data=[
-            [
-                s['feature'], s['mean'], s['std'],
-                s['mean'] - s['ci_95'], s['mean'] + s['ci_95'],
-                s['p_value'],
-                "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
+    if wandb.run is not None:
+        summary_table = wandb.Table(
+            columns=["Feature", "Mean SV", "Std", "CI Low", "CI High", "p-value", "Significance"],
+            data=[
+                [
+                    s['feature'], s['mean'], s['std'],
+                    s['mean'] - s['ci_95'], s['mean'] + s['ci_95'],
+                    s['p_value'],
+                    "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
+                ]
+                for s in sorted(stats, key=lambda x: abs(x['mean']), reverse=True)
             ]
-            for s in sorted(stats, key=lambda x: abs(x['mean']), reverse=True)
-        ]
-    )
-    wandb.log({"shapley_summary": summary_table})
+        )
+        wandb.log({"shapley_summary": summary_table})
 
     # Save
     np.savez(
@@ -464,7 +471,8 @@ def main():
     print("\nGenerating plots...")
     plot_shapley_values(stats, shapley_per_run, action_names, args.n_runs, output_dir, metric=args.metric)
 
-    wandb.finish()
+    if wandb.run is not None:
+        wandb.finish()
 
     print(f"\n{'=' * 70}")
     print("SHAPLEY ANALYSIS COMPLETE")
