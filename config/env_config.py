@@ -8,10 +8,10 @@ from typing import Dict, Tuple, Optional
 @dataclass
 class EnvConfig:
     """Configuration for XROMultiYearEnv."""
-    
+
     # ENSO threshold for determining events
     threshold: float = 0.5
-    
+
     # Action scaling factors per variable per month (mean absolute change from observational data)
     # Shape: 9 variables × 12 months [Jan=0 ... Dec=11]
     # Variables: WWV, NPMM, SPMM, IOB, IOD, SIOD, TNA, ATL3, SASD
@@ -56,16 +56,16 @@ class EnvConfig:
         # SASD
         [0.2482, 0.2678, 0.2373, 0.2033, 0.1483, 0.1462, 0.1647, 0.1318, 0.1185, 0.1810, 0.2137, 0.3544],
     ])
-    
+
     # Observation space dimension
     obs_dim: int = 11  # 10 variables + 1 month feature
-    
+
     # Action space dimension
     action_dim: int = 9
-    
+
     # Maximum steps for environment (None = continuous)
     max_steps: Optional[int] = None
-    
+
     # Reward structure parameters (matches _calculate_reward in xro_env.py)
     reward_config: Dict = field(default_factory=lambda: {
         "action_penalty_weight": 0.002,
@@ -75,20 +75,20 @@ class EnvConfig:
         "duration_penalty_start": 24,  # months
         "duration_penalty_rate": 0.3,  # per month beyond 24
     })
-    
+
     # Data configuration
     data_config: Dict = field(default_factory=lambda: {
         "data_path": "data/XRO_indices_oras5.nc",
         "train_start": "1979-01",
         "train_end": "2022-12",
     })
-    
+
     # XRO model configuration
     # xro_config: Dict = field(default_factory=lambda: {
     #     "maskb": ,
     #     "maskNT": ,
     # })
-    
+
     def __post_init__(self):
         """Validate configuration."""
         if self.threshold <= 0:
@@ -99,3 +99,5 @@ class EnvConfig:
             raise ValueError("Each action_scale row must have 12 monthly values")
         if self.action_dim <= 0 or self.obs_dim <= 0:
             raise ValueError("action_dim and obs_dim must be positive")
+
+        self.action_scale = [[v / 2 for v in row] for row in self.action_scale]

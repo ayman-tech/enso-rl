@@ -4,15 +4,17 @@ Shapley Value Analysis for ENSO RL Agent Actions.
 Computes Shapley values for each action dimension using sampling-based
 approximation (permutation sampling). Uses N independent paired-seed runs
 for statistical robustness with t-tests, 95% CIs, and significance testing.
+Uses multiprocessing to parallelize across independent seed runs.
 
 Usage:
-    python scripts/shapley_analysis.py --model rl_model
-    python scripts/shapley_analysis.py --model rl_model --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
+    uv run scripts/shapley_analysis.py --model rl_model
+    uv run scripts/shapley_analysis.py --model rl_model --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
 Params meaning :
     n-runs: No of independent seeded simulation runs for statistical robustness (each produces one set of Shapley values; used for t-tests and confidence intervals).
     n-permutations: No of random action orderings sampled/run to approximate the Shapley values (more = better approximation of the combinatorial sum).
 """
 import sys
+import os
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,6 +22,7 @@ import wandb
 from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
+from multiprocessing import Pool, cpu_count
 
 # Add repo root to path
 repo_root = Path(__file__).parent.parent.parent
@@ -174,6 +177,30 @@ def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metri
     return shapley_values, all_marginals
 
 
+def _worker_shapley(args):
+    """
+    Worker function for multiprocessing.
+    Each worker loads its own model/env to avoid shared state issues.
+    """
+    run_idx, seed, model_path, num_months, n_permutations, metric, perm_seed = args
+
+    suppress_warnings()
+    np.random.seed(perm_seed)
+
+    env_config = EnvConfig()
+    model, env, var_names = load_environment(model_path, env_config)
+
+    sv, marginals = compute_shapley_for_seed(
+        env, model, num_months, n_permutations, seed, metric=metric
+    )
+
+    action_names = list(var_names[1:])
+    top_idx = np.argmax(np.abs(sv))
+    print(f"  [Worker] Run {run_idx+1} (seed={seed}) done — top: {action_names[top_idx]} (SV={sv[top_idx]:+.6f})")
+
+    return run_idx, sv, marginals
+
+
 def compute_statistics(shapley_per_run, action_names):
     """
     Compute paired-run statistics on Shapley values.
@@ -307,6 +334,8 @@ def main():
                         choices=["mye_prob", "enso_months", "avg_reward"],
                         help="Value function for Shapley analysis (default: avg_reward)")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Number of parallel workers (default: cpu_count - 1)")
     args = parser.parse_args()
 
     suppress_warnings()
@@ -318,11 +347,14 @@ def main():
     # Initialize W&B
     wandb_config = WandbConfig()
     run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
+    n_workers = args.workers if args.workers else max(1, cpu_count() - 1)
+
     wandb.init(
         project=wandb_config.project,
         entity=wandb_config.entity,
         name=run_name,
         job_type="shapley-analysis",
+        group="analysis",
         tags=["shapley", "analysis", args.metric],
         config={
             "model": args.model,
@@ -331,6 +363,7 @@ def main():
             "n_permutations": args.n_permutations,
             "metric": args.metric,
             "master_seed": args.master_seed,
+            "n_workers": n_workers,
         },
     )
 
@@ -339,12 +372,16 @@ def main():
     print("=" * 70)
 
     env_config = EnvConfig()
-    model, env, var_names = load_environment(args.model, env_config)
+    _, _, var_names = load_environment(args.model, env_config)
     action_names = list(var_names[1:])
 
     # Generate shared seeds from master RNG
     master_rng = np.random.default_rng(args.master_seed)
     shared_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
+
+    # Generate independent permutation seeds for each worker (reproducibility)
+    perm_rng = np.random.default_rng(args.master_seed + 1)
+    perm_seeds = [int(perm_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
 
     n_actions = 9
     total_sims = args.n_runs * args.n_permutations * (n_actions + 1)
@@ -353,20 +390,23 @@ def main():
     print(f"  METRIC          = {args.metric} ({METRIC_LABELS[args.metric]})")
     print(f"  SIM_MONTHS      = {args.months} ({args.months // 12} years)")
     print(f"  Total sims      = {total_sims}")
+    print(f"  Workers         = {n_workers}")
     print(f"{'=' * 70}\n")
 
-    # Compute per-run Shapley values
+    # Build worker args
+    worker_args = [
+        (run_idx, seed, args.model, args.months, args.n_permutations, args.metric, perm_seeds[run_idx])
+        for run_idx, seed in enumerate(shared_seeds)
+    ]
+
+    # Run in parallel
     shapley_per_run = np.zeros((args.n_runs, n_actions))
 
-    for run_idx, seed in enumerate(shared_seeds):
-        print(f"--- Run {run_idx+1}/{args.n_runs} (seed={seed}) ---")
-        sv, marginals = compute_shapley_for_seed(
-            env, model, args.months, args.n_permutations, seed, metric=args.metric
-        )
-        shapley_per_run[run_idx] = sv
+    with Pool(processes=n_workers) as pool:
+        results = pool.map(_worker_shapley, worker_args)
 
-        top_idx = np.argmax(np.abs(sv))
-        print(f"  Top driver this run: {action_names[top_idx]} (SV={sv[top_idx]:+.6f})\n")
+    for run_idx, sv, marginals in results:
+        shapley_per_run[run_idx] = sv
 
         # Log per-run Shapley values to W&B
         run_log = {f"shapley/{name}": sv[i] for i, name in enumerate(action_names)}

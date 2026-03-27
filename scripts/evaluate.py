@@ -5,12 +5,12 @@ Evaluation script for trained ENSO RL agent.
 - intervention for ablation study results
 
 Usage:
-    python scripts/evaluate.py --model ppo_enso_model
-    python scripts/evaluate.py --model model --intervention --months 2400
-    python scripts/evaluate.py --model model --all --no-wandb
-    python scripts/evaluate.py --model model --basic
-    python scripts/evaluate.py --model model --intervention
-    python scripts/evaluate.py --model model --trajectory
+    uv run scripts/evaluate.py --model ppo_enso_model
+    uv run scripts/evaluate.py --model model --intervention --months 2400
+    uv run scripts/evaluate.py --model model --all --no-wandb
+    uv run scripts/evaluate.py --model model --basic
+    uv run scripts/evaluate.py --model model --intervention
+    uv run scripts/evaluate.py --model model --trajectory
 """
 import sys
 import argparse

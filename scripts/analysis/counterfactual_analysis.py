@@ -8,8 +8,8 @@ providing a more precise counterfactual than zero-ablation.
 Uses paired seeded runs for statistical robustness.
 
 Usage:
-    python scripts/counterfactual_analysis.py --model rl_model
-    python scripts/counterfactual_analysis.py --model rl_model --n-runs 30 --months 1200
+    uv run scripts/analysis/counterfactual_analysis.py --model rl_model
+    uv run scripts/analysis/counterfactual_analysis.py --model rl-model --n-runs 30 --months 1200
 """
 import sys
 import argparse
@@ -373,12 +373,13 @@ def main():
 
     # Initialize W&B
     wandb_config = WandbConfig()
-    run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
+    run_name = datetime.now().strftime(r"counter %H:%M %d-%m-%y")
     wandb.init(
         project=wandb_config.project,
         entity=wandb_config.entity,
         name=run_name,
         job_type="counterfactual-analysis",
+        group="analysis",
         tags=["counterfactual", "analysis", "ablation"],
         config={
             "model": args.model,
