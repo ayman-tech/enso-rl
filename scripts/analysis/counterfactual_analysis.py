@@ -10,6 +10,7 @@ Uses paired seeded runs for statistical robustness.
 Usage:
     uv run scripts/analysis/counterfactual_analysis.py --model rl_model
     uv run scripts/analysis/counterfactual_analysis.py --model rl-model --n-runs 30 --months 1200
+    uv run scripts/analysis/counterfactual_analysis.py --model rl_model --metric mye_prob
 """
 import sys
 import argparse
@@ -30,6 +31,17 @@ from utils.enso_classifier import classify_enso_event
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
 from XRO.core import XRO
+
+METRIC_LABELS = {
+    'avg_reward': 'Average Reward',
+    'mye_prob': 'MYE Probability',
+}
+
+# Map metric name to result dict keys
+METRIC_KEYS = {
+    'avg_reward': ('rewards_baseline', 'rewards_mean_clamp', 'rewards_zero_ablate'),
+    'mye_prob': ('mye_baseline', 'mye_mean_clamp', 'mye_zero_ablate'),
+}
 
 
 def load_environment(model_path: str, env_config: EnvConfig):
@@ -112,7 +124,7 @@ def simulate_counterfactual(env, model, num_months, seed,
         zero_idx: Action index to set to zero (classic ablation)
 
     Returns:
-        dict with avg_reward and mye_probability
+        dict with avg_reward and mye_prob
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
@@ -136,7 +148,7 @@ def simulate_counterfactual(env, model, num_months, seed,
 
     return {
         'avg_reward': total_reward / num_months,
-        'mye_probability': mye_prob,
+        'mye_prob': mye_prob,
     }
 
 
@@ -186,7 +198,7 @@ def run_paired_analysis(env, model, var_names, num_months, n_runs,
         # Baseline
         result = simulate_counterfactual(env, model, num_months, seed)
         rewards_baseline[run_idx] = result['avg_reward']
-        mye_baseline[run_idx] = result['mye_probability']
+        mye_baseline[run_idx] = result['mye_prob']
         sim_count += 1
 
         for feat_idx in range(n_features):
@@ -196,7 +208,7 @@ def run_paired_analysis(env, model, var_names, num_months, n_runs,
                 clamp_idx=feat_idx, clamp_value=float(mean_actions[feat_idx])
             )
             rewards_mean_clamp[run_idx, feat_idx] = result['avg_reward']
-            mye_mean_clamp[run_idx, feat_idx] = result['mye_probability']
+            mye_mean_clamp[run_idx, feat_idx] = result['mye_prob']
             sim_count += 1
 
             # Zero-ablated (classical)
@@ -205,7 +217,7 @@ def run_paired_analysis(env, model, var_names, num_months, n_runs,
                 zero_idx=feat_idx
             )
             rewards_zero_ablate[run_idx, feat_idx] = result['avg_reward']
-            mye_zero_ablate[run_idx, feat_idx] = result['mye_probability']
+            mye_zero_ablate[run_idx, feat_idx] = result['mye_prob']
             sim_count += 1
 
         if (run_idx + 1) % 5 == 0:
@@ -224,24 +236,25 @@ def run_paired_analysis(env, model, var_names, num_months, n_runs,
     }
 
 
-def compute_statistics(results):
-    """Compute ΔR statistics for both counterfactual methods."""
-    n_runs = len(results['rewards_baseline'])
-    baseline = results['rewards_baseline']
+def compute_statistics(results, metric='avg_reward'):
+    """Compute Δ statistics for both counterfactual methods."""
+    baseline_key, clamp_key, zero_key = METRIC_KEYS[metric]
+    n_runs = len(results[baseline_key])
+    baseline = results[baseline_key]
     controllable_vars = results['controllable_vars']
 
     stats = []
     for feat_idx, feat_name in enumerate(controllable_vars):
-        # Mean-clamped ΔR
-        dr_clamp = results['rewards_mean_clamp'][:, feat_idx] - baseline
+        # Mean-clamped Δ
+        dr_clamp = results[clamp_key][:, feat_idx] - baseline
         mean_clamp = dr_clamp.mean()
         se_clamp = dr_clamp.std(ddof=1) / np.sqrt(n_runs)
         ci_clamp = sp_stats.t.ppf(0.975, df=n_runs - 1) * se_clamp
         t_clamp = mean_clamp / se_clamp if se_clamp > 0 else 0
         p_clamp = 2 * sp_stats.t.sf(abs(t_clamp), df=n_runs - 1)
 
-        # Zero-ablated ΔR
-        dr_zero = results['rewards_zero_ablate'][:, feat_idx] - baseline
+        # Zero-ablated Δ
+        dr_zero = results[zero_key][:, feat_idx] - baseline
         mean_zero = dr_zero.mean()
         se_zero = dr_zero.std(ddof=1) / np.sqrt(n_runs)
         ci_zero = sp_stats.t.ppf(0.975, df=n_runs - 1) * se_zero
@@ -261,12 +274,13 @@ def compute_statistics(results):
     return stats
 
 
-def plot_comparison(stats, n_runs, output_dir):
+def plot_comparison(stats, n_runs, output_dir, metric='avg_reward'):
     """Plot mean-clamp vs zero-ablation comparison."""
+    metric_label = METRIC_LABELS.get(metric, metric)
     features = [s['feature'] for s in stats]
     n = len(features)
 
-    # Sort by mean-clamp ΔR magnitude
+    # Sort by mean-clamp Δ magnitude
     sorted_idx = np.argsort([abs(s['dr_mean_clamp']) for s in stats])[::-1]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 8), sharey=True)
@@ -285,8 +299,8 @@ def plot_comparison(stats, n_runs, output_dir):
     ax1.axhline(0, color='gray', linestyle='--')
     ax1.set_xticks(x)
     ax1.set_xticklabels(sorted_features, rotation=45, ha='right')
-    ax1.set_ylabel(f'Mean ΔR ± 95% CI (N={n_runs})', fontsize=13)
-    ax1.set_title('Counterfactual: Clamp to Mean Action', fontsize=15)
+    ax1.set_ylabel(f'Mean Δ{metric_label} ± 95% CI (N={n_runs})', fontsize=13)
+    ax1.set_title(f'Counterfactual: Clamp to Mean — {metric_label}', fontsize=15)
     ax1.grid(axis='y', alpha=0.3)
 
     # Significance stars
@@ -307,7 +321,7 @@ def plot_comparison(stats, n_runs, output_dir):
     ax2.axhline(0, color='gray', linestyle='--')
     ax2.set_xticks(x)
     ax2.set_xticklabels(sorted_features, rotation=45, ha='right')
-    ax2.set_title('Classical Ablation: Set Action to Zero', fontsize=15)
+    ax2.set_title(f'Classical Ablation: Set to Zero — {metric_label}', fontsize=15)
     ax2.grid(axis='y', alpha=0.3)
 
     for idx_pos, orig_idx in enumerate(sorted_idx):
@@ -317,13 +331,13 @@ def plot_comparison(stats, n_runs, output_dir):
         va = 'bottom' if zero_vals[idx_pos] >= 0 else 'top'
         ax2.text(idx_pos, y, star, ha='center', va=va, fontsize=10, fontweight='bold')
 
-    fig.suptitle('Counterfactual vs Classical Ablation Analysis', fontsize=17, y=1.02)
+    fig.suptitle(f'Counterfactual vs Classical Ablation — {metric_label}', fontsize=17, y=1.02)
     fig.tight_layout()
-    fig.savefig(output_dir / 'counterfactual_comparison.png', dpi=150, bbox_inches='tight')
+    fig.savefig(output_dir / f'counterfactual_comparison_{metric}.png', dpi=150, bbox_inches='tight')
     plt.close(fig)
-    print(f"  Saved {output_dir / 'counterfactual_comparison.png'}")
+    print(f"  Saved {output_dir / f'counterfactual_comparison_{metric}.png'}")
 
-    # Scatter: clamp ΔR vs zero ΔR
+    # Scatter: clamp Δ vs zero Δ
     fig2, ax3 = plt.subplots(figsize=(10, 10))
     dr_clamp_all = [s['dr_mean_clamp'] for s in stats]
     dr_zero_all = [s['dr_zero'] for s in stats]
@@ -338,22 +352,22 @@ def plot_comparison(stats, n_runs, output_dir):
     lims = [min(min(dr_zero_all), min(dr_clamp_all)) - 0.01,
             max(max(dr_zero_all), max(dr_clamp_all)) + 0.01]
     ax3.plot(lims, lims, 'r--', alpha=0.5, label='Agreement line')
-    ax3.set_xlabel('Zero-Ablation ΔR', fontsize=13)
-    ax3.set_ylabel('Mean-Clamp ΔR', fontsize=13)
-    ax3.set_title('Method Agreement: Clamp-to-Mean vs Zero-Ablation', fontsize=15)
+    ax3.set_xlabel(f'Zero-Ablation Δ{metric_label}', fontsize=13)
+    ax3.set_ylabel(f'Mean-Clamp Δ{metric_label}', fontsize=13)
+    ax3.set_title(f'Method Agreement — {metric_label}', fontsize=15)
     ax3.legend()
     ax3.grid(alpha=0.3)
     ax3.set_aspect('equal')
     fig2.tight_layout()
-    fig2.savefig(output_dir / 'counterfactual_scatter.png', dpi=150, bbox_inches='tight')
+    fig2.savefig(output_dir / f'counterfactual_scatter_{metric}.png', dpi=150, bbox_inches='tight')
     plt.close(fig2)
-    print(f"  Saved {output_dir / 'counterfactual_scatter.png'}")
+    print(f"  Saved {output_dir / f'counterfactual_scatter_{metric}.png'}")
 
     # Log plots to W&B
     if wandb.run is not None:
         wandb.log({
-            "counterfactual_comparison": wandb.Image(str(output_dir / 'counterfactual_comparison.png')),
-            "counterfactual_scatter": wandb.Image(str(output_dir / 'counterfactual_scatter.png')),
+            f"counterfactual_comparison_{metric}": wandb.Image(str(output_dir / f'counterfactual_comparison_{metric}.png')),
+            f"counterfactual_scatter_{metric}": wandb.Image(str(output_dir / f'counterfactual_scatter_{metric}.png')),
         })
 
 
@@ -363,34 +377,43 @@ def main():
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
     parser.add_argument("--n-runs", type=int, default=20, help="Number of paired runs")
     parser.add_argument("--seed", type=int, default=42, help="Master seed")
+    parser.add_argument("--metric", type=str, default="avg_reward",
+                        choices=["avg_reward", "mye_prob"],
+                        help="Metric for analysis (default: avg_reward)")
+    parser.add_argument("--no-wandb", action="store_true",
+                        help="Disable W&B logging")
     args = parser.parse_args()
 
     suppress_warnings()
     np.random.seed(args.seed)
 
-    output_dir = Path("plots/counterfactual")
+    metric_label = METRIC_LABELS[args.metric]
+
+    output_dir = Path("plots/counterfactual") / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize W&B
-    wandb_config = WandbConfig()
-    run_name = datetime.now().strftime(r"counter %H:%M %d-%m-%y")
-    wandb.init(
-        project=wandb_config.project,
-        entity=wandb_config.entity,
-        name=run_name,
-        job_type="counterfactual-analysis",
-        group="analysis",
-        tags=["counterfactual", "analysis", "ablation"],
-        config={
-            "model": args.model,
-            "months": args.months,
-            "n_runs": args.n_runs,
-            "master_seed": args.seed,
-        },
-    )
+    if not args.no_wandb:
+        wandb_config = WandbConfig()
+        run_name = datetime.now().strftime(r"counter %H:%M %d-%m-%y")
+        wandb.init(
+            project=wandb_config.project,
+            entity=wandb_config.entity,
+            name=run_name,
+            job_type="counterfactual-analysis",
+            group="analysis",
+            tags=["counterfactual", "analysis", "ablation", args.metric],
+            config={
+                "model": args.model,
+                "months": args.months,
+                "n_runs": args.n_runs,
+                "master_seed": args.seed,
+                "metric": args.metric,
+            },
+        )
 
     print("=" * 70)
-    print("COUNTERFACTUAL TRAJECTORY ANALYSIS")
+    print(f"COUNTERFACTUAL TRAJECTORY ANALYSIS — {metric_label}")
     print("=" * 70)
 
     env_config = EnvConfig()
@@ -405,10 +428,10 @@ def main():
     for i, name in enumerate(controllable_vars):
         print(f"    {name:<10}: {mean_actions[i]:+.4f}")
 
-    # Log mean actions to W&B
-    wandb.log({f"mean_action/{name}": float(mean_actions[i]) for i, name in enumerate(controllable_vars)})
+    if wandb.run is not None:
+        wandb.log({f"mean_action/{name}": float(mean_actions[i]) for i, name in enumerate(controllable_vars)})
 
-    # Step 2: Run paired analysis
+    # Step 2: Run paired analysis (collects both metrics in one pass)
     print(f"\nStep 2: Running paired analysis ({args.n_runs} runs × {1 + 2*9} conditions = {args.n_runs * 19} sims)...")
     results = run_paired_analysis(
         env, model, var_names,
@@ -417,13 +440,13 @@ def main():
     )
 
     # Step 3: Statistical analysis
-    print(f"\nStep 3: Computing statistics...")
-    stats = compute_statistics(results)
+    print(f"\nStep 3: Computing statistics for {metric_label}...")
+    stats = compute_statistics(results, metric=args.metric)
 
     print(f"\n{'='*100}")
-    print(f"COUNTERFACTUAL ANALYSIS — Results (N={args.n_runs} paired runs)")
+    print(f"COUNTERFACTUAL ANALYSIS — {metric_label} (N={args.n_runs} paired runs)")
     print(f"{'='*100}")
-    print(f"{'Feature':<10} | {'Clamp ΔR':>10} {'±CI':>8} {'p':>8} {'Sig':>5} | {'Zero ΔR':>10} {'±CI':>8} {'p':>8} {'Sig':>5}")
+    print(f"{'Feature':<10} | {'Clamp Δ':>10} {'±CI':>8} {'p':>8} {'Sig':>5} | {'Zero Δ':>10} {'±CI':>8} {'p':>8} {'Sig':>5}")
     print("-" * 100)
 
     for s in sorted(stats, key=lambda x: x['dr_mean_clamp']):
@@ -432,21 +455,22 @@ def main():
         print(f"{s['feature']:<10} | {s['dr_mean_clamp']:>+10.4f} {s['ci_clamp']:>8.4f} {s['p_clamp']:>8.4f} {sig_c:>5} | {s['dr_zero']:>+10.4f} {s['ci_zero']:>8.4f} {s['p_zero']:>8.4f} {sig_z:>5}")
 
     # Log summary table to W&B
-    summary_table = wandb.Table(
-        columns=["Feature", "Clamp ΔR", "Clamp CI", "Clamp p-value", "Clamp Sig",
-                 "Zero ΔR", "Zero CI", "Zero p-value", "Zero Sig"],
-        data=[
-            [
-                s['feature'],
-                s['dr_mean_clamp'], s['ci_clamp'], s['p_clamp'],
-                "***" if s['p_clamp'] < 0.001 else "**" if s['p_clamp'] < 0.01 else "*" if s['p_clamp'] < 0.05 else "ns",
-                s['dr_zero'], s['ci_zero'], s['p_zero'],
-                "***" if s['p_zero'] < 0.001 else "**" if s['p_zero'] < 0.01 else "*" if s['p_zero'] < 0.05 else "ns",
+    if wandb.run is not None:
+        summary_table = wandb.Table(
+            columns=["Feature", "Clamp Δ", "Clamp CI", "Clamp p-value", "Clamp Sig",
+                     "Zero Δ", "Zero CI", "Zero p-value", "Zero Sig"],
+            data=[
+                [
+                    s['feature'],
+                    s['dr_mean_clamp'], s['ci_clamp'], s['p_clamp'],
+                    "***" if s['p_clamp'] < 0.001 else "**" if s['p_clamp'] < 0.01 else "*" if s['p_clamp'] < 0.05 else "ns",
+                    s['dr_zero'], s['ci_zero'], s['p_zero'],
+                    "***" if s['p_zero'] < 0.001 else "**" if s['p_zero'] < 0.01 else "*" if s['p_zero'] < 0.05 else "ns",
+                ]
+                for s in sorted(stats, key=lambda x: abs(x['dr_mean_clamp']), reverse=True)
             ]
-            for s in sorted(stats, key=lambda x: abs(x['dr_mean_clamp']), reverse=True)
-        ]
-    )
-    wandb.log({"counterfactual_summary": summary_table})
+        )
+        wandb.log({f"counterfactual_summary_{args.metric}": summary_table})
 
     # Agreement check
     from scipy.stats import spearmanr
@@ -455,24 +479,28 @@ def main():
     rho, pval = spearmanr(clamp_ranks, zero_ranks)
     print(f"\nRank correlation (Spearman) between methods: ρ = {rho:.3f}, p = {pval:.4f}")
 
-    wandb.log({"spearman_rho": rho, "spearman_p": pval})
+    if wandb.run is not None:
+        wandb.log({f"spearman_rho_{args.metric}": rho, f"spearman_p_{args.metric}": pval})
 
     # Save
+    baseline_key, clamp_key, zero_key = METRIC_KEYS[args.metric]
     np.savez(
         output_dir / 'counterfactual_results.npz',
-        rewards_baseline=results['rewards_baseline'],
-        rewards_mean_clamp=results['rewards_mean_clamp'],
-        rewards_zero_ablate=results['rewards_zero_ablate'],
+        baseline=results[baseline_key],
+        mean_clamp=results[clamp_key],
+        zero_ablate=results[zero_key],
         mean_actions=mean_actions,
         controllable_vars=controllable_vars,
+        metric=args.metric,
     )
     print(f"\nResults saved to {output_dir / 'counterfactual_results.npz'}")
 
     # Plot
     print("\nGenerating plots...")
-    plot_comparison(stats, args.n_runs, output_dir)
+    plot_comparison(stats, args.n_runs, output_dir, metric=args.metric)
 
-    wandb.finish()
+    if wandb.run is not None:
+        wandb.finish()
 
     print(f"\n{'='*70}")
     print("COUNTERFACTUAL ANALYSIS COMPLETE")

@@ -134,7 +134,7 @@ def simulate_with_coalition(env, model, coalition_mask, num_months, seed, metric
     return compute_metric_from_trajectory(enso_history, env.threshold, metric)
 
 
-def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metric='avg_reward'):
+def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metric='mye_prob'):
     """
     Compute Shapley values for a single seed via permutation sampling.
 
@@ -331,9 +331,9 @@ def main():
     parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
     parser.add_argument("--n-runs", type=int, default=30, help="Number of independent seeds (paired trials)")
     parser.add_argument("--n-permutations", type=int, default=20, help="Permutations per run")
-    parser.add_argument("--metric", type=str, default="avg_reward",
+    parser.add_argument("--metric", type=str, default="mye_prob",
                         choices=["mye_prob", "enso_months", "avg_reward"],
-                        help="Value function for Shapley analysis (default: avg_reward)")
+                        help="Value function for Shapley analysis (default: mye_prob)")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     parser.add_argument("--workers", type=int, default=None,
                         help="Number of parallel workers (default: cpu_count - 1)")

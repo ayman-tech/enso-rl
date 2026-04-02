@@ -9,8 +9,8 @@ Uses N independent paired-seed runs for statistical robustness with t-tests,
 95% CIs, and significance testing.
 
 Usage:
-    python scripts/integrated_gradients.py --model rl_model
-    python scripts/integrated_gradients.py --model rl_model --n-runs 30 --months 1200
+    uv run scripts/analysis/integrated_gradients.py --model rl_model
+    uv run scripts/analysis/integrated_gradients.py --model rl_model --n-runs 30 --months 1200
 """
 import sys
 import argparse
@@ -20,7 +20,7 @@ import torch
 from pathlib import Path
 from scipy import stats as sp_stats
 
-repo_root = Path(__file__).parent.parent
+repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
