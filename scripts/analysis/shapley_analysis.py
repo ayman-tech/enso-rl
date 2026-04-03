@@ -18,24 +18,22 @@ import sys
 import os
 import argparse
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import wandb
 from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
-from multiprocessing import Pool, cpu_count
+import multiprocessing as mp
+from multiprocessing import cpu_count
 
 # Add repo root to path
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from stable_baselines3 import PPO
-from config import EnvConfig, WandbConfig
-from utils.data_processing import load_observational_data, prepare_xro_parameters
-from utils.enso_classifier import classify_enso_event
-from envs import XROMultiYearEnv
-from utils import suppress_warnings
-from XRO.core import XRO
+# Fixed variable names — avoids loading PyTorch in main process before fork
+ACTION_NAMES = ['WWV', 'NPMM', 'SPMM', 'IOB', 'IOD', 'SIOD', 'TNA', 'ATL3', 'SASD']
 
 METRIC_LABELS = {
     'mye_prob': 'MYE Probability',
@@ -55,6 +53,7 @@ def compute_metric_from_trajectory(enso_history, threshold, metric):
     Returns:
         float: Metric value
     """
+    from utils.enso_classifier import classify_enso_event
     enso = np.array(enso_history)
 
     if metric == 'mye_prob':
@@ -70,8 +69,15 @@ def compute_metric_from_trajectory(enso_history, threshold, metric):
     raise ValueError(f"Unknown metric: {metric}")
 
 
-def load_environment(model_path: str, env_config: EnvConfig):
+def load_environment(model_path: str):
     """Load trained model and create environment."""
+    from stable_baselines3 import PPO
+    from config import EnvConfig
+    from utils.data_processing import load_observational_data, prepare_xro_parameters
+    from envs import XROMultiYearEnv
+    from XRO.core import XRO
+
+    env_config = EnvConfig()
     model_path_str = model_path
     if not model_path_str.endswith('.zip'):
         model_path_str += '.zip'
@@ -98,7 +104,7 @@ def load_environment(model_path: str, env_config: EnvConfig):
     )
 
     model = PPO.load(str(model_path), env=env)
-    return model, env, var_names
+    return model, env
 
 
 def simulate_with_coalition(env, model, coalition_mask, num_months, seed, metric):
@@ -182,22 +188,22 @@ def _worker_shapley(args):
     """
     Worker function for multiprocessing.
     Each worker loads its own model/env to avoid shared state issues.
+    All heavy imports (PyTorch, SB3) happen here, not in the main process.
     """
     run_idx, seed, model_path, num_months, n_permutations, metric, perm_seed = args
 
+    from utils import suppress_warnings
     suppress_warnings()
     np.random.seed(perm_seed)
 
-    env_config = EnvConfig()
-    model, env, var_names = load_environment(model_path, env_config)
+    model, env = load_environment(model_path)
 
     sv, marginals = compute_shapley_for_seed(
         env, model, num_months, n_permutations, seed, metric=metric
     )
 
-    action_names = list(var_names[1:])
     top_idx = np.argmax(np.abs(sv))
-    print(f"  [Worker] Run {run_idx+1} (seed={seed}) done — top: {action_names[top_idx]} (SV={sv[top_idx]:+.6f})")
+    print(f"  [Worker] Run {run_idx+1} (seed={seed}) done — top: {ACTION_NAMES[top_idx]} (SV={sv[top_idx]:+.6f})", flush=True)
 
     return run_idx, sv, marginals
 
@@ -326,6 +332,9 @@ def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir
 
 
 def main():
+    # Use 'spawn' to avoid PyTorch fork deadlocks on Linux
+    mp.set_start_method('spawn', force=True)
+
     parser = argparse.ArgumentParser(description="Shapley Value Analysis for ENSO RL Agent")
     parser.add_argument("--model", type=str, default="rl_model", help="Path to trained model")
     parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
@@ -341,16 +350,19 @@ def main():
                         help="Disable W&B logging (useful for HPC without internet)")
     args = parser.parse_args()
 
+    # No PyTorch imports in main process — workers handle their own
+    from utils import suppress_warnings
     suppress_warnings()
     np.random.seed(args.master_seed)
 
     output_dir = Path("plots/shapley") / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize W&B
     n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
+    action_names = ACTION_NAMES
 
     if not args.no_wandb:
+        from config import WandbConfig
         wandb_config = WandbConfig()
         run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
         wandb.init(
@@ -375,10 +387,6 @@ def main():
     print("SHAPLEY VALUE ANALYSIS FOR ENSO RL AGENT")
     print("=" * 70)
 
-    env_config = EnvConfig()
-    _, _, var_names = load_environment(args.model, env_config)
-    action_names = list(var_names[1:])
-
     # Generate shared seeds from master RNG
     master_rng = np.random.default_rng(args.master_seed)
     shared_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
@@ -396,7 +404,7 @@ def main():
     print(f"  Total sims      = {total_sims}")
     print(f"  Workers         = {n_workers}")
     print(f"  W&B             = {'enabled' if not args.no_wandb else 'disabled'}")
-    print(f"{'=' * 70}\n")
+    print(f"{'=' * 70}\n", flush=True)
 
     # Build worker args
     worker_args = [
@@ -407,7 +415,7 @@ def main():
     # Run in parallel
     shapley_per_run = np.zeros((args.n_runs, n_actions))
 
-    with Pool(processes=n_workers) as pool:
+    with mp.Pool(processes=n_workers) as pool:
         results = pool.map(_worker_shapley, worker_args)
 
     for run_idx, sv, marginals in results:
