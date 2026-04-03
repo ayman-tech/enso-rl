@@ -236,7 +236,7 @@ def run_paired_analysis(env, model, var_names, num_months, n_runs,
     }
 
 
-def compute_statistics(results, metric='avg_reward'):
+def compute_statistics(results, metric='mye_prob'):
     """Compute Δ statistics for both counterfactual methods."""
     baseline_key, clamp_key, zero_key = METRIC_KEYS[metric]
     n_runs = len(results[baseline_key])
@@ -274,7 +274,7 @@ def compute_statistics(results, metric='avg_reward'):
     return stats
 
 
-def plot_comparison(stats, n_runs, output_dir, metric='avg_reward'):
+def plot_comparison(stats, n_runs, output_dir, metric='mye_prob'):
     """Plot mean-clamp vs zero-ablation comparison."""
     metric_label = METRIC_LABELS.get(metric, metric)
     features = [s['feature'] for s in stats]
@@ -377,9 +377,9 @@ def main():
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
     parser.add_argument("--n-runs", type=int, default=20, help="Number of paired runs")
     parser.add_argument("--seed", type=int, default=42, help="Master seed")
-    parser.add_argument("--metric", type=str, default="avg_reward",
+    parser.add_argument("--metric", type=str, default="mye_prob",
                         choices=["avg_reward", "mye_prob"],
-                        help="Metric for analysis (default: avg_reward)")
+                        help="Metric for analysis (default: mye_prob)")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Disable W&B logging")
     args = parser.parse_args()
