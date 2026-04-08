@@ -16,6 +16,7 @@ Params meaning :
 """
 import sys
 import os
+import time
 import argparse
 import numpy as np
 import matplotlib
@@ -383,6 +384,8 @@ def main():
             },
         )
 
+    start_time = time.time()
+
     print("=" * 70)
     print("SHAPLEY VALUE ANALYSIS FOR ENSO RL AGENT")
     print("=" * 70)
@@ -482,8 +485,12 @@ def main():
     if wandb.run is not None:
         wandb.finish()
 
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
     print(f"\n{'=' * 70}")
-    print("SHAPLEY ANALYSIS COMPLETE")
+    print(f"SHAPLEY ANALYSIS COMPLETE — Total time: {hours}h {minutes}m {seconds}s")
     print(f"{'=' * 70}")
 
 
