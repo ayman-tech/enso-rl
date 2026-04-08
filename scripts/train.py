@@ -7,6 +7,7 @@ Usage (normal and Full customizable run):
 """
 import sys
 import io
+import time
 import argparse
 import warnings
 from pathlib import Path
@@ -259,6 +260,8 @@ def main():
     print("-"*20 + "ENSO RL AGENT TRAINING PIPELINE" + "-"*20)
     
     try:
+        start_time = time.time()
+
         # Setup
         obs_ds, train_ds, var_names, bounds, params = setup_environment(env_config)
         
@@ -286,12 +289,18 @@ def main():
         if wandb_config.mode != "disabled":
             wandb.finish()
         
+        elapsed = time.time() - start_time
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
         print("\n" + "="*70)
-        print(" "*20 + "TRAINING PIPELINE COMPLETED")
+        print(f" "*20 + f"TRAINING PIPELINE COMPLETED — Total time: {hours}h {minutes}m {seconds}s")
         print("="*70 + "\n")
-        
+
     except Exception as e:
-        print(f"\n[ERROR] Pipeline failed: {e}")
+        elapsed = time.time() - start_time
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        print(f"\n[ERROR] Pipeline failed after {hours}h {minutes}m {seconds}s: {e}")
         import traceback
         traceback.print_exc()
         if wandb_config.mode != "disabled":

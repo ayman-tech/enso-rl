@@ -13,6 +13,7 @@ Usage:
     uv run scripts/analysis/integrated_gradients.py --model rl_model --n-runs 30 --months 1200
 """
 import sys
+import time
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -377,6 +378,7 @@ def main():
     args = parser.parse_args()
 
     suppress_warnings()
+    start_time = time.time()
     np.random.seed(args.master_seed)
 
     output_dir = Path("plots/integrated_gradients")
@@ -473,8 +475,11 @@ def main():
     )
     plot_ig_heatmap(mean_ig_matrix_all, var_names, output_dir)
 
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
     print(f"\n{'=' * 70}")
-    print("INTEGRATED GRADIENTS ANALYSIS COMPLETE")
+    print(f"INTEGRATED GRADIENTS ANALYSIS COMPLETE — Total time: {hours}h {minutes}m {seconds}s")
     print(f"{'=' * 70}")
 
 

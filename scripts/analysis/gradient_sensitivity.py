@@ -13,6 +13,7 @@ Usage:
     python scripts/gradient_sensitivity.py --model rl_model --n-runs 30 --months 1200
 """
 import sys
+import time
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
@@ -358,6 +359,8 @@ def main():
     output_dir = Path("plots/gradient_sensitivity")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    start_time = time.time()
+
     print("=" * 70)
     print("GRADIENT-BASED SENSITIVITY ANALYSIS (Robust Multi-Run)")
     print("=" * 70)
@@ -439,8 +442,12 @@ def main():
     )
     plot_jacobian_heatmap(mean_jacobian_all, var_names, output_dir)
 
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
     print(f"\n{'=' * 70}")
-    print("GRADIENT SENSITIVITY ANALYSIS COMPLETE")
+    print(f"GRADIENT SENSITIVITY ANALYSIS COMPLETE — Total time: {hours}h {minutes}m {seconds}s")
     print(f"{'=' * 70}")
 
 

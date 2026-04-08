@@ -13,6 +13,7 @@ Usage:
     uv run scripts/evaluate.py --model model --trajectory
 """
 import sys
+import time
 import argparse
 import numpy as np
 import pandas as pd
@@ -429,7 +430,8 @@ def main():
     
     try:
         suppress_warnings()
-        
+        start_time = time.time()
+
         # Initialize W&B flag early (before any code that might fail)
         wandb_enabled = not args.no_wandb
         
@@ -478,10 +480,16 @@ def main():
         if wandb_enabled and wandb.run is not None:
             wandb.finish()
         
-        print("-"*20 + "EVALUATION PIPELINE COMPLETED" + "-"*20)
-        
+        elapsed = time.time() - start_time
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        print(f"-"*20 + f"EVALUATION PIPELINE COMPLETED — Total time: {hours}h {minutes}m {seconds}s" + "-"*20)
+
     except Exception as e:
-        print(f"\n[ERROR] Evaluation failed: {e}")
+        elapsed = time.time() - start_time
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        print(f"\n[ERROR] Evaluation failed after {hours}h {minutes}m {seconds}s: {e}")
         import traceback
         traceback.print_exc()
         if wandb_enabled and wandb.run is not None:
