@@ -22,6 +22,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from utils import suppress_warnings
 import wandb
 from datetime import datetime
 from pathlib import Path
@@ -352,7 +353,6 @@ def main():
     args = parser.parse_args()
 
     # No PyTorch imports in main process — workers handle their own
-    from utils import suppress_warnings
     suppress_warnings()
     np.random.seed(args.master_seed)
 
@@ -439,7 +439,7 @@ def main():
     print(f"{'Feature':<10} | {'Mean SV':>10} | {'Std':>8} | {'95% CI':>20} | {'p-value':>10} | {'Sig?':>6}")
     print(f"{'-'*80}")
 
-    for s in sorted(stats, key=lambda x: abs(x['mean']), reverse=True):
+    for s in sorted(stats, key=lambda x: x['mean'], reverse=True):
         ci_lo = s['mean'] - s['ci_95']
         ci_hi = s['mean'] + s['ci_95']
         sig = "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
