@@ -11,6 +11,11 @@ Usage:
     uv run scripts/analysis/counterfactual_analysis.py --model rl_model
     uv run scripts/analysis/counterfactual_analysis.py --model rl-model --n-runs 30 --months 1200
     uv run scripts/analysis/counterfactual_analysis.py --model rl_model --metric mye_prob
+
+Robust :
+    uv run scripts/analysis/counterfactual_analysis.py \
+        --model rl_model --metric mye_prob \
+        --months 2400 --n-runs 100
 """
 import sys
 import time

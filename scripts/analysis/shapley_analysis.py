@@ -13,6 +13,11 @@ Usage:
 Params meaning :
     n-runs: No of independent seeded simulation runs for statistical robustness (each produces one set of Shapley values; used for t-tests and confidence intervals).
     n-permutations: No of random action orderings sampled/run to approximate the Shapley values (more = better approximation of the combinatorial sum).
+
+Robust run :
+    uv run scripts/analysis/shapley_analysis.py \
+        --model rl_model --metric mye_prob --months 2400 \
+        --n-runs 100 --n-permutations 100
 """
 import sys
 import os
@@ -22,7 +27,6 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from utils import suppress_warnings
 import wandb
 from datetime import datetime
 from pathlib import Path
@@ -30,9 +34,11 @@ from scipy import stats as sp_stats
 import multiprocessing as mp
 from multiprocessing import cpu_count
 
-# Add repo root to path
+# Add repo root to path (must precede any repo-local imports)
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
+
+from utils import suppress_warnings
 
 # Fixed variable names — avoids loading PyTorch in main process before fork
 ACTION_NAMES = ['WWV', 'NPMM', 'SPMM', 'IOB', 'IOD', 'SIOD', 'TNA', 'ATL3', 'SASD']
