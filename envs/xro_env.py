@@ -53,7 +53,42 @@ class XROMultiYearEnv(gym.Env):
         
         self.enso_history = []
         self.consecutive_enso_months = 0
+        self.enso_phase_sign = 0  # +1 El Nino, -1 La Nina, 0 neutral
         self.threshold = params.get('threshold', 0.5)
+
+        # Reward weights (defaults mirror EnvConfig.reward_config)
+        reward_config = params.get('reward_config', {})
+        self.action_penalty_weight = reward_config.get('action_penalty_weight', 0.002)
+        self.realism_penalty_weight = reward_config.get('realism_penalty_weight', 0.05)
+        realism_quantile = reward_config.get('realism_quantile', 0.95)
+        # Phase-specific duration ceilings + ramp (discourage unrealistic persistence)
+        self.duration_ceiling_el_nino = reward_config.get('duration_ceiling_el_nino', 24)
+        self.duration_ceiling_la_nina = reward_config.get('duration_ceiling_la_nina', 36)
+        self.duration_penalty_rate = reward_config.get('duration_penalty_rate', 0.3)
+
+        # State-plausibility (Mahalanobis) reference from observed climatology.
+        # Catches extreme/implausible single states; the duration ramp above
+        # handles the temporal (over-persistence) failure mode it cannot see.
+        self._init_realism_reference(train_ds, var_names, realism_quantile)
+
+    def _init_realism_reference(self, train_ds, var_names, quantile):
+        """Precompute mean, inverse covariance, and chi-squared activation
+        threshold of the observed state distribution for the Mahalanobis penalty."""
+        from scipy.stats import chi2
+
+        # Stack observed states into [n_time, n_modes] and drop incomplete rows
+        obs_states = np.column_stack([
+            np.asarray(train_ds[name].values, dtype=np.float64) for name in var_names
+        ])
+        obs_states = obs_states[~np.isnan(obs_states).any(axis=1)]
+
+        self._realism_mean = obs_states.mean(axis=0)
+        cov = np.cov(obs_states, rowvar=False)
+        # Small ridge for numerical stability of the inverse
+        cov += np.eye(cov.shape[0]) * 1e-6
+        self._realism_inv_cov = np.linalg.inv(cov)
+        # Activation threshold: states beyond this chi-squared quantile are penalized
+        self._realism_threshold = float(chi2.ppf(quantile, df=len(var_names)))
 
     def reset(self, seed=None):
         """Reset environment to initial state."""
@@ -68,7 +103,8 @@ class XROMultiYearEnv(gym.Env):
         self.current_step = 0
         self.enso_history = [self.state[0]]
         self.consecutive_enso_months = 0
-        
+        self.enso_phase_sign = 0
+
         return self._get_obs(), {}
 
     def _get_obs(self):
@@ -113,34 +149,72 @@ class XROMultiYearEnv(gym.Env):
         """
         enso_index = self.state[0]
         threshold = self.threshold
-        
+
         # Initialize reward components
-        action_penalty = -0.002 * np.sum(action ** 2)
+        action_penalty = -self.action_penalty_weight * np.sum(action ** 2)
         duration_reward = 0.0
-        duration_penalty = 0.0
-        
-        # ENSO duration tracking
-        if enso_index > threshold or enso_index < -threshold:
+
+        # ENSO duration tracking (sign-aware: a phase flip starts a new event,
+        # so an El Nino -> La Nina swing is not counted as one continuous event)
+        if enso_index > threshold:
+            current_sign = 1
+        elif enso_index < -threshold:
+            current_sign = -1
+        else:
+            current_sign = 0
+
+        if current_sign == 0:
+            # Neutral: event ends
+            self.consecutive_enso_months = 0
+        elif current_sign == self.enso_phase_sign:
+            # Same phase persists
             self.consecutive_enso_months += 1
         else:
-            self.consecutive_enso_months = 0
+            # New event of the opposite (or first) phase
+            self.consecutive_enso_months = 1
+        self.enso_phase_sign = current_sign
         
-        # Duration reward (scales with event length)
+        # Duration reward: full in the multi-year band, then a soft per-phase
+        # over-persistence penalty beyond the observed ceiling. The ramp (not a
+        # cliff) keeps realistic long events fully rewarded while making
+        # physically impossible persistence (e.g. a 100-year La Nina) unviable —
+        # a temporal failure the per-state Mahalanobis term cannot detect.
+        duration_penalty = 0.0
         if self.consecutive_enso_months > 0:
             if self.consecutive_enso_months <= 6:
                 duration_reward = 0.1    # very soft: event just starting
             elif self.consecutive_enso_months <= 12:
                 duration_reward = 0.3     # soft: approaching multi-year
-            elif self.consecutive_enso_months <= 24:
-                duration_reward = 1.0     # hard: multi-year event achieved
             else:
-                # 24+ months: penalty ramps to discourage unrealistic persistence
-                duration_penalty = -0.3 * (self.consecutive_enso_months - 24)
-        
+                duration_reward = 1.0     # multi-year event (>=13 months)
+
+            # Phase-specific over-persistence penalty
+            ceiling = (self.duration_ceiling_el_nino if current_sign > 0
+                       else self.duration_ceiling_la_nina)
+            if self.consecutive_enso_months > ceiling:
+                over = self.consecutive_enso_months - ceiling
+                duration_penalty = -self.duration_penalty_rate * over
+
+        # State-plausibility (Mahalanobis) penalty: discourage extreme/implausible
+        # single states regardless of duration. Zero inside the observed envelope.
+        realism_penalty = self._realism_penalty()
+
         # Combine all components
-        total_reward = duration_reward + duration_penalty + action_penalty
-        
+        total_reward = duration_reward + duration_penalty + realism_penalty + action_penalty
+
         return float(total_reward)
+
+    def _realism_penalty(self):
+        """Penalize states outside the observed multivariate envelope.
+
+        Returns 0 when the squared Mahalanobis distance of the current state
+        from the observed climatology is within the chi-squared threshold, and
+        a negative penalty proportional to the excess otherwise.
+        """
+        delta = self.state - self._realism_mean
+        d2 = float(delta @ self._realism_inv_cov @ delta)
+        excess = max(0.0, d2 - self._realism_threshold)
+        return -self.realism_penalty_weight * excess
 
     def _check_multi_year_event(self, history):
         """

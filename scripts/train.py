@@ -2,8 +2,8 @@
 Main training script for ENSO RL agent.
 
 Usage (normal and Full customizable run):
-    python scripts/train.py --epochs 1000 --name "ppo-train"
-    python scripts/train.py --epochs 1000 --name "ppo-train" --lr 0.0001 --no-wandb --debug
+    uv run scripts/train.py --epochs 1000 --name "ppo-train"
+    uv run scripts/train.py --epochs 1000 --name "ppo-train" --lr 0.0001 --no-wandb --debug
 """
 import sys
 import io
@@ -29,7 +29,7 @@ from utils.data_processing import (
     prepare_xro_parameters
 )
 from utils.evaluation import evaluate_agent
-from callbacks import WandbCallback
+from callbacks import WandbCallback, MYEEvalCallback
 from envs import XROMultiYearEnv
 from XRO.core import XRO
 
@@ -106,15 +106,19 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
 
 
 @timer
-def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig):
+def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
+                    eval_env=None):
     """
     Train PPO agent on the environment.
-    
+
     Args:
         env: Gymnasium environment
         train_config (TrainConfig): Training configuration
         wandb_config (WandbConfig): W&B configuration
-        
+        eval_env: Separate env for periodic mye_prob evaluation (not the training
+            env, whose rollout would be corrupted by eval resets). If None, the
+            mye_prob eval callback is skipped.
+
     Returns:
         PPO: Trained model
     """
@@ -138,14 +142,25 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig):
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
             gamma=0.99,
+            seed=train_config.seed,
             verbose=1
         )
         
-        # Train with W&B callback
-        wandb_callback = WandbCallback(verbose=1)
+        # Train with W&B callback (+ periodic mye_prob evaluation if eval_env given)
+        callbacks = [WandbCallback(verbose=1)]
+        if eval_env is not None:
+            # Evaluate roughly 20 times over the run (at least every 24k steps)
+            eval_freq = max(train_config.n_steps,
+                            min(24000, train_config.train_months // 20))
+            callbacks.append(MYEEvalCallback(
+                eval_env=eval_env,
+                eval_freq=eval_freq,
+                eval_steps=train_config.sim_months,
+                verbose=1,
+            ))
         model.learn(
             total_timesteps=train_config.train_months,
-            callback=wandb_callback
+            callback=callbacks
         )
         
         # Restore stdout
@@ -233,6 +248,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--seed", type=int, default=None, help="PPO random seed (reproducibility / ensembles)")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument("--name", type=str, default="train-run", help="Name of WandB training Run")
     args = parser.parse_args()
@@ -250,6 +266,8 @@ def main():
         train_config.train_months = args.epochs * train_config.n_steps
     if args.lr:
         train_config.learning_rate = args.lr
+    if args.seed is not None:
+        train_config.seed = args.seed
     if args.no_wandb:
         wandb_config.mode = "disabled"
     if args.name:
@@ -278,9 +296,18 @@ def main():
             max_steps=train_config.episode_length
         )
         print("\t[OK] Environment created")
-        
+
+        # Separate env for periodic mye_prob evaluation during training
+        # (kept distinct so eval resets don't corrupt the PPO rollout)
+        eval_env = XROMultiYearEnv(
+            params=params,
+            train_ds=train_ds,
+            var_names=var_names,
+            max_steps=train_config.episode_length
+        )
+
         # Train
-        model = train_ppo_agent(env, train_config, wandb_config)
+        model = train_ppo_agent(env, train_config, wandb_config, eval_env=eval_env)
         
         # Evaluate
         evaluate_trained_model(env, model)

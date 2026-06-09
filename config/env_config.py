@@ -71,9 +71,21 @@ class EnvConfig:
         "action_penalty_weight": 0.002,
         "duration_reward_0_6m": 0.1,
         "duration_reward_7_12m": 0.3,
-        "duration_reward_13_24m": 1.0,
-        "duration_penalty_start": 24,  # months
-        "duration_penalty_rate": 0.3,  # per month beyond 24
+        "duration_reward_13m_plus": 1.0,  # full reward in the multi-year band
+        # Phase-specific duration ceilings (months). Beyond the ceiling a soft
+        # linear penalty ramps up to discourage *unrealistic persistence* — a
+        # temporal failure mode the per-state Mahalanobis term cannot catch.
+        # Ceilings = the observed ORAS5 maxima (El Nino 18mo, La Nina 25mo),
+        # rounded up slightly so the real triple-dip La Nina (25mo) is still
+        # fully rewarded but anything *longer than ever observed* is penalized.
+        "duration_ceiling_el_nino": 20,
+        "duration_ceiling_la_nina": 27,
+        "duration_penalty_rate": 0.7,  # per month beyond the phase ceiling (sharp brake)
+        # State-plausibility (Mahalanobis) penalty: catches *extreme/implausible
+        # states* (e.g. Nino3.4 at -3 sigma, impossible mode combinations),
+        # complementary to the duration brake above.
+        "realism_penalty_weight": 0.05,
+        "realism_quantile": 0.95,  # chi-squared quantile (dof = n_modes) for activation
     })
 
     # Data configuration

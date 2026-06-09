@@ -68,8 +68,9 @@ def prepare_xro_parameters(model, train_ds, var_names, bounds):
         'bounds': bounds,
         'dt': 1.0 / 12.0,
         'action_scale': config.action_scale,
+        'reward_config': config.reward_config,
     }
-    
+
     return params
 
 
