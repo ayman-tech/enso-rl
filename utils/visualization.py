@@ -14,27 +14,31 @@ def create_plots_directory():
     os.makedirs("plots", exist_ok=True)
 
 
-def save_and_log_plot(fig, plot_name, wandb_enabled=False):
+def save_and_log_plot(fig, plot_name, wandb_enabled=False, subdir=None):
     """
     Save figure to disk and optionally log to W&B.
-    
+
     Args:
         fig: Matplotlib figure object
         plot_name (str): Name of the plot (without extension)
         wandb_enabled (bool): Whether to log to W&B
-        
+        subdir (str): Optional subdirectory under plots/ (e.g. model name) to
+            namespace outputs so parallel/repeated runs don't overwrite.
+
     Returns:
         str: Path to saved plot
     """
-    create_plots_directory()
-    file_path = f"plots/{plot_name}.png"
+    out_dir = os.path.join("plots", subdir) if subdir else "plots"
+    os.makedirs(out_dir, exist_ok=True)
+    file_path = os.path.join(out_dir, f"{plot_name}.png")
     fig.savefig(file_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
-    
+
     # Log to W&B if enabled
     if wandb_enabled and wandb.run is not None:
-        wandb.log({f"plots/{plot_name}": wandb.Image(file_path)})
-    
+        wandb_key = f"plots/{subdir}/{plot_name}" if subdir else f"plots/{plot_name}"
+        wandb.log({wandb_key: wandb.Image(file_path)})
+
     return file_path
 
 
@@ -196,16 +200,17 @@ def plot_robust_interventional(delta_r_values, n_runs, wandb_enabled=False):
     return save_and_log_plot(fig, "interventional_analysis_robust", wandb_enabled)
 
 
-def plot_nino_classification(enso_traj, classifications_array, threshold=0.5, num_months=None, wandb_enabled=False):
+def plot_nino_classification(enso_traj, classifications_array, threshold=0.5, num_months=None, wandb_enabled=False, model_name=None):
     """
     Plot ENSO trajectory with month-by-month event classification.
-    
+
     Args:
         enso_traj (array): ENSO index time series
         classifications_array (array): Month-by-month event classifications
         num_months (int): Total number of months
         wandb_enabled (bool): Log to W&B
-        
+        model_name (str): Optional model name; saves under plots/<model_name>/
+
     Returns:
         str: Path to saved plot
     """
@@ -257,7 +262,7 @@ def plot_nino_classification(enso_traj, classifications_array, threshold=0.5, nu
               bbox_to_anchor=(0.5, -0.3), frameon=True, fontsize=9)
     
     fig.tight_layout()
-    return save_and_log_plot(fig, "01_nino3.4_traj", wandb_enabled)
+    return save_and_log_plot(fig, "01_nino3.4_traj", wandb_enabled, subdir=model_name)
 
 
 def create_evaluation_summary_plots(evaluation_results, wandb_enabled=False):

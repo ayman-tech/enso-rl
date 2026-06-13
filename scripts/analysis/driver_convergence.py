@@ -1,0 +1,146 @@
+"""
+Driver convergence figure (paper point 1.5 payoff).
+
+Overlays the per-mode driver importance from THREE independent attributions and
+checks whether they agree:
+  1. Counterfactual zero-ablation ΔP(MYE)   (plots/counterfactual/ensemble/counterfactual_ensemble.npz)
+  2. Shapley value on mye_prob              (plots/shapley/ensemble/shapley_ensemble.npz)
+  3. Agent-free interventional ΔP(MYE)      (plots/interventional_xro/interventional_xro.npz)
+
+Methods 1-2 are policy-grounded (ensemble of trained agents); method 3 is the
+agent-free causal check. Convergence across all three — especially the
+sustainers-vs-brakes split and the El Nino/La Nina asymmetry — is the
+review-proof evidence.
+
+Because the three use different units, importance is z-scored within each method
+before overlay; rank agreement is reported via Spearman rho on the raw values.
+
+Usage:
+    uv run scripts/analysis/driver_convergence.py
+    uv run scripts/analysis/driver_convergence.py --phase la_nina
+"""
+import sys
+import argparse
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from pathlib import Path
+from scipy.stats import spearmanr
+
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root))
+
+PHASES = ['total', 'el_nino', 'la_nina']
+PHASE_LABELS = {'total': 'Total MYE', 'el_nino': 'Multi-year El Nino',
+                'la_nina': 'Multi-year La Nina'}
+
+CF_NPZ = Path("plots/counterfactual/ensemble/counterfactual_ensemble.npz")
+SH_NPZ = Path("plots/shapley/ensemble/shapley_ensemble.npz")
+IV_NPZ = Path("plots/interventional_xro/interventional_xro.npz")
+
+
+def _zscore(x):
+    x = np.asarray(x, dtype=float)
+    sd = x.std()
+    return (x - x.mean()) / sd if sd > 1e-12 else x - x.mean()
+
+
+def load_counterfactual(phase):
+    """Returns {feature: value}. Note: counterfactual ablation ΔP is NEGATIVE for
+    drivers (removing a driver lowers P(MYE)); negate so 'higher = stronger driver'
+    to align sign with Shapley/interventional."""
+    if not CF_NPZ.exists():
+        return None
+    d = np.load(CF_NPZ, allow_pickle=True)
+    feats = [str(f) for f in d['features']]
+    return dict(zip(feats, -d[f'mean_{phase}']))
+
+
+def load_shapley(phase):
+    if not SH_NPZ.exists():
+        return None
+    d = np.load(SH_NPZ, allow_pickle=True)
+    feats = [str(f) for f in d['features']]
+    return dict(zip(feats, d[f'mean_{phase}']))
+
+
+def load_interventional(phase, sign='+'):
+    """Agent-free: pick the requested sign; value = ΔP(MYE) (higher = adds MYE)."""
+    if not IV_NPZ.exists():
+        return None
+    d = np.load(IV_NPZ, allow_pickle=True)
+    targets = [str(t) for t in d['targets']]
+    signs = [str(s) for s in d['signs']]
+    phases = [str(p) for p in d['phases']]
+    out = {}
+    for t, s, p, m in zip(targets, signs, phases, d['mean']):
+        if s == sign and p == phase:
+            out[t] = float(m)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Driver convergence across 3 methods")
+    ap.add_argument("--phase", choices=PHASES + ['all'], default='all')
+    ap.add_argument("--iv-sign", choices=['+', '-'], default='+',
+                    help="Which interventional perturbation sign to use")
+    args = ap.parse_args()
+
+    out_dir = Path("plots/convergence")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    phases = PHASES if args.phase == 'all' else [args.phase]
+
+    for phase in phases:
+        cf = load_counterfactual(phase)
+        sh = load_shapley(phase)
+        iv = load_interventional(phase, args.iv_sign)
+
+        methods = {'Counterfactual (-ΔP)': cf, 'Shapley': sh,
+                   f'Interventional ({args.iv_sign}ΔP)': iv}
+        avail = {k: v for k, v in methods.items() if v}
+        if len(avail) < 2:
+            print(f"[{phase}] need >=2 methods present; found {list(avail)}. "
+                  f"Run the ensemble + interventional scripts first.")
+            continue
+
+        # Common features (modes only; interventional also has groups -> intersect)
+        common = set.intersection(*[set(v.keys()) for v in avail.values()])
+        # keep a stable mode order: counterfactual/shapley feature order if present
+        ref = cf or sh
+        feats = [f for f in ref.keys() if f in common]
+
+        # z-scored overlay
+        fig, ax = plt.subplots(figsize=(max(10, len(feats)), 6))
+        x = np.arange(len(feats))
+        width = 0.8 / len(avail)
+        for k, (mname, mdict) in enumerate(avail.items()):
+            vals = _zscore([mdict[f] for f in feats])
+            ax.bar(x + k * width, vals, width, label=mname, edgecolor='black', linewidth=0.5)
+        ax.axhline(0, color='gray', ls='--', lw=0.8)
+        ax.set_xticks(x + width * (len(avail) - 1) / 2)
+        ax.set_xticklabels(feats, rotation=45, ha='right')
+        ax.set_ylabel('Driver importance (z-scored within method)')
+        ax.set_title(f'Driver convergence — {PHASE_LABELS[phase]}\n'
+                     f'(higher = stronger sustainer; lower = brake)')
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+        fig.tight_layout()
+        out = out_dir / f'convergence_{phase}.png'
+        fig.savefig(out, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"[{phase}] saved {out}")
+
+        # Spearman rank agreement (raw values, pairwise)
+        names = list(avail.keys())
+        print(f"  Rank agreement (Spearman rho), {phase}:")
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a = [avail[names[i]][f] for f in feats]
+                b = [avail[names[j]][f] for f in feats]
+                rho, pv = spearmanr(a, b)
+                print(f"    {names[i]:<26} vs {names[j]:<26}: rho={rho:+.3f} (p={pv:.3f})")
+
+
+if __name__ == "__main__":
+    main()

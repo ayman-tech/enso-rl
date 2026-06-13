@@ -57,7 +57,7 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
         dict: {'total', 'el_nino', 'la_nina'} — fraction of months in a
               multi-year event of each type.
     """
-    from utils.enso_classifier import classify_enso_event
+    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 
     obs, _ = env.reset(seed=seed)
     enso_history = [obs[0]]
@@ -70,14 +70,7 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
         enso_history.append(obs[0])
 
     classified = classify_enso_event(enso_history, threshold=env.threshold)
-    n = len(classified)
-    el_nino = int(np.sum(classified == 'Multi-year El Nino'))
-    la_nina = int(np.sum(classified == 'Multi-year La Nina'))
-    return {
-        'total': (el_nino + la_nina) / n,
-        'el_nino': el_nino / n,
-        'la_nina': la_nina / n,
-    }
+    return mye_fraction_by_phase(classified)
 
 
 def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None,

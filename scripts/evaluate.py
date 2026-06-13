@@ -322,10 +322,10 @@ def run_interventional_analysis(model, env, var_names, disable_idx=None, num_mon
     return delta_r_values
 
 
-def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5, wandb_enabled=False):
+def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5, wandb_enabled=False, model_name="model"):
     """
     Run trajectory analysis and visualization.
-    
+
     Args:
         model: Trained model
         env: Environment
@@ -333,10 +333,14 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
         num_months (int): Duration of simulation
         threshold (float): ENSO event threshold from env_config
         wandb_enabled (bool): Whether W&B is enabled
-        
+        model_name (str): Name of the model (used to namespace output dir)
+
     Returns:
         dict: Simulation data and trajectory dataframe
     """
+    # Per-model output dir so parallel/repeated runs don't overwrite each other
+    out_dir = Path("plots") / model_name
+    out_dir.mkdir(parents=True, exist_ok=True)
     print("\n" + "="*70)
     print("TRAJECTORY ANALYSIS")
     print("="*70)
@@ -386,32 +390,32 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
     
     # Save to CSV
     output_file = "trajectory_analysis.csv"
-    trajectory_df.to_csv(output_file, index=False)
-    print(f"\n[OK] Trajectory data saved to {output_file}")
+    # trajectory_df.to_csv(output_file, index=False)
+    # print(f"\n[OK] Trajectory data saved to {output_file}")
     
     # Generate plots
     print("\nGenerating visualization plots...")
-    plot_control_actions(sim['actions_traj'], var_names, num_months=num_months, wandb_enabled=wandb_enabled)
-    plot_state_variables(sim['states_traj'][:-1], var_names, threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
-    plot_nino_classification(sim['enso_traj'], sim['classified_event_array'], threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
+    # plot_control_actions(sim['actions_traj'], var_names, num_months=num_months, wandb_enabled=wandb_enabled)
+    # plot_state_variables(sim['states_traj'][:-1], var_names, threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
+    plot_nino_classification(sim['enso_traj'], sim['classified_event_array'], threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled, model_name=model_name)
     
     # Generate KDE plots by event type
     print("Generating KDE plots by event type...")
-    plot_action_kde_by_event(sim['actions_traj'], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
-    plot_state_kde_by_event(sim['states_traj'][:-1], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
+    # plot_action_kde_by_event(sim['actions_traj'], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
+    # plot_state_kde_by_event(sim['states_traj'][:-1], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
     
     print("[OK] Plots saved to plots/ folder and logged to W&B")
     
     # Generate ENSO table with colors
     print("\nGenerating ENSO index table...")
-    save_enso_table_html(sim['enso_traj'], output_path="plots/enso_table.html", threshold=threshold, wandb_enabled=wandb_enabled)
-    save_enso_table_matplotlib(sim['enso_traj'], output_path="plots/enso_table.png", threshold=threshold)
+    # save_enso_table_html(sim['enso_traj'], output_path=str(out_dir / "enso_table.html"), threshold=threshold, wandb_enabled=wandb_enabled)
+    # save_enso_table_matplotlib(sim['enso_traj'], output_path=str(out_dir / "enso_table.png"), threshold=threshold)
     if wandb_enabled:
         log_enso_table_wandb(sim['enso_traj'], threshold=threshold)
-    
+
     print("[OK] ENSO table saved as HTML and PNG")
-    print("     → Open plots/enso_table.html in your browser for interactive table")
-    print("     → View plots/enso_table.png for image version")
+    print(f"     → Open {out_dir / 'enso_table.html'} in your browser for interactive table")
+    print(f"     → View {out_dir / 'enso_table.png'} for image version")
     
     return {'sim': sim, 'trajectory_df': trajectory_df}
 
@@ -486,7 +490,10 @@ def main():
                                         wandb_enabled=wandb_enabled)
         
         if args.all or args.trajectory:
-            run_trajectory_analysis(model, env, var_names, num_months=args.months, threshold=env_config.threshold, wandb_enabled=wandb_enabled)
+            run_trajectory_analysis(
+                model, env, var_names, num_months=args.months, 
+                threshold=env_config.threshold, wandb_enabled=wandb_enabled, 
+                model_name=args.model)
 
         if args.all or args.lift:
             # Phase-resolved MYE lift (1.1, 1.2). Logs into THIS evaluate run's

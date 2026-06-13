@@ -267,7 +267,7 @@ def main():
     args = parser.parse_args()
 
     suppress_warnings()
-    output_dir = Path("plots/lift")
+    output_dir = Path(f"plots/lift/{args.prefix}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.no_wandb:
