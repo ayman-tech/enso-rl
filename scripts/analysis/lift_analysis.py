@@ -267,7 +267,9 @@ def main():
     args = parser.parse_args()
 
     suppress_warnings()
-    output_dir = Path(f"plots/lift/{args.prefix}")
+    # Namespace by model name (single) or ensemble prefix: plots/<name>/lift
+    name = args.prefix if args.ensemble else args.model
+    output_dir = Path("plots") / name / "lift"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.no_wandb:

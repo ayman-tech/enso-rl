@@ -381,7 +381,7 @@ def main():
     start_time = time.time()
     np.random.seed(args.master_seed)
 
-    output_dir = Path("plots/integrated_gradients")
+    output_dir = Path("plots") / args.model / "integrated_gradients"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

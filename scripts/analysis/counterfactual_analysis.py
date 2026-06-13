@@ -477,7 +477,7 @@ def main():
 
     if args.ensemble:
         suppress_warnings()
-        out = Path("plots/counterfactual") / "ensemble"
+        out = Path("plots") / args.prefix / "counterfactual" / "ensemble"
         out.mkdir(parents=True, exist_ok=True)
         print("=" * 70)
         print("COUNTERFACTUAL — ENSEMBLE (cross-seed, phase-resolved)")
@@ -490,7 +490,7 @@ def main():
 
     metric_label = METRIC_LABELS[args.metric]
 
-    output_dir = Path("plots/counterfactual") / args.metric
+    output_dir = Path("plots") / args.model / "counterfactual" / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize W&B

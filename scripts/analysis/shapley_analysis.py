@@ -432,7 +432,7 @@ def main():
     if args.ensemble:
         suppress_warnings()
         np.random.seed(args.master_seed)
-        out = Path("plots/shapley") / "ensemble"
+        out = Path("plots") / args.prefix / "shapley" / "ensemble"
         out.mkdir(parents=True, exist_ok=True)
         print("=" * 70)
         print("SHAPLEY — ENSEMBLE (cross-seed, phase-resolved)")
@@ -444,7 +444,7 @@ def main():
     suppress_warnings()
     np.random.seed(args.master_seed)
 
-    output_dir = Path("plots/shapley") / args.metric
+    output_dir = Path("plots") / args.model / "shapley" / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
 
     n_workers = args.workers if args.workers else max(1, cpu_count() - 2)

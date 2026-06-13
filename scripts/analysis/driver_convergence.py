@@ -35,9 +35,12 @@ PHASES = ['total', 'el_nino', 'la_nina']
 PHASE_LABELS = {'total': 'Total MYE', 'el_nino': 'Multi-year El Nino',
                 'la_nina': 'Multi-year La Nina'}
 
-CF_NPZ = Path("plots/counterfactual/ensemble/counterfactual_ensemble.npz")
-SH_NPZ = Path("plots/shapley/ensemble/shapley_ensemble.npz")
-IV_NPZ = Path("plots/interventional_xro/interventional_xro.npz")
+def npz_paths(prefix):
+    """Per-ensemble npz locations, namespaced under plots/<prefix>/."""
+    base = Path("plots") / prefix
+    return (base / "counterfactual" / "ensemble" / "counterfactual_ensemble.npz",
+            base / "shapley" / "ensemble" / "shapley_ensemble.npz",
+            base / "interventional_xro" / "interventional_xro.npz")
 
 
 def _zscore(x):
@@ -46,30 +49,30 @@ def _zscore(x):
     return (x - x.mean()) / sd if sd > 1e-12 else x - x.mean()
 
 
-def load_counterfactual(phase):
+def load_counterfactual(phase, cf_npz):
     """Returns {feature: value}. Note: counterfactual ablation ΔP is NEGATIVE for
     drivers (removing a driver lowers P(MYE)); negate so 'higher = stronger driver'
     to align sign with Shapley/interventional."""
-    if not CF_NPZ.exists():
+    if not cf_npz.exists():
         return None
-    d = np.load(CF_NPZ, allow_pickle=True)
+    d = np.load(cf_npz, allow_pickle=True)
     feats = [str(f) for f in d['features']]
     return dict(zip(feats, -d[f'mean_{phase}']))
 
 
-def load_shapley(phase):
-    if not SH_NPZ.exists():
+def load_shapley(phase, sh_npz):
+    if not sh_npz.exists():
         return None
-    d = np.load(SH_NPZ, allow_pickle=True)
+    d = np.load(sh_npz, allow_pickle=True)
     feats = [str(f) for f in d['features']]
     return dict(zip(feats, d[f'mean_{phase}']))
 
 
-def load_interventional(phase, sign='+'):
+def load_interventional(phase, iv_npz, sign='+'):
     """Agent-free: pick the requested sign; value = ΔP(MYE) (higher = adds MYE)."""
-    if not IV_NPZ.exists():
+    if not iv_npz.exists():
         return None
-    d = np.load(IV_NPZ, allow_pickle=True)
+    d = np.load(iv_npz, allow_pickle=True)
     targets = [str(t) for t in d['targets']]
     signs = [str(s) for s in d['signs']]
     phases = [str(p) for p in d['phases']]
@@ -82,19 +85,22 @@ def load_interventional(phase, sign='+'):
 
 def main():
     ap = argparse.ArgumentParser(description="Driver convergence across 3 methods")
+    ap.add_argument("--prefix", type=str, default="rl_model",
+                    help="Ensemble prefix; reads plots/<prefix>/ and writes there")
     ap.add_argument("--phase", choices=PHASES + ['all'], default='all')
     ap.add_argument("--iv-sign", choices=['+', '-'], default='+',
                     help="Which interventional perturbation sign to use")
     args = ap.parse_args()
 
-    out_dir = Path("plots/convergence")
+    cf_npz, sh_npz, iv_npz = npz_paths(args.prefix)
+    out_dir = Path("plots") / args.prefix / "convergence"
     out_dir.mkdir(parents=True, exist_ok=True)
     phases = PHASES if args.phase == 'all' else [args.phase]
 
     for phase in phases:
-        cf = load_counterfactual(phase)
-        sh = load_shapley(phase)
-        iv = load_interventional(phase, args.iv_sign)
+        cf = load_counterfactual(phase, cf_npz)
+        sh = load_shapley(phase, sh_npz)
+        iv = load_interventional(phase, iv_npz, args.iv_sign)
 
         methods = {'Counterfactual (-ΔP)': cf, 'Shapley': sh,
                    f'Interventional ({args.iv_sign}ΔP)': iv}

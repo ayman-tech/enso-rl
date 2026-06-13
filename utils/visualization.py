@@ -134,7 +134,7 @@ def plot_state_variables(states_traj, var_names, threshold=0.5, num_months=None,
     return save_and_log_plot(fig, "03_state_variables", wandb_enabled)
 
 
-def plot_robust_interventional(delta_r_values, n_runs, wandb_enabled=False):
+def plot_robust_interventional(delta_r_values, n_runs, wandb_enabled=False, model_name=None):
     """
     Generate robust interventional analysis plot with CIs and significance stars.
     
@@ -197,7 +197,7 @@ def plot_robust_interventional(delta_r_values, n_runs, wandb_enabled=False):
     ax.grid(axis='y', linestyle='--', alpha=0.5)
     fig.tight_layout()
     
-    return save_and_log_plot(fig, "interventional_analysis_robust", wandb_enabled)
+    return save_and_log_plot(fig, "interventional_analysis_robust", wandb_enabled, subdir=model_name)
 
 
 def plot_nino_classification(enso_traj, classifications_array, threshold=0.5, num_months=None, wandb_enabled=False, model_name=None):

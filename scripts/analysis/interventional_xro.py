@@ -194,10 +194,13 @@ def main():
     parser.add_argument("--master-seed", type=int, default=42)
     parser.add_argument("--groups-only", action="store_true",
                         help="Only run the mode groups, skip singles")
+    parser.add_argument("--prefix", type=str, default="rl_model",
+                        help="Namespace label (match the ensemble prefix so the "
+                             "convergence figure finds this output)")
     args = parser.parse_args()
 
     suppress_warnings()
-    output_dir = Path("plots/interventional_xro")
+    output_dir = Path("plots") / args.prefix / "interventional_xro"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

@@ -391,7 +391,7 @@ def main():
     suppress_warnings()
     np.random.seed(args.master_seed)
 
-    output_dir = Path("plots/mutual_information")
+    output_dir = Path("plots") / args.model / "mutual_information"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()

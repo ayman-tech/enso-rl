@@ -1,4 +1,4 @@
-.PHONY: train evaluate shapley counterfactual igi ensemble shapley-ensemble counterfactual-ensemble shapley-ensemble-robust counterfactual-ensemble-robust
+.PHONY: train evaluate shapley counterfactual igi ensemble shapley-ensemble counterfactual-ensemble shapley-ensemble-robust counterfactual-ensemble-robust interventional convergence
 
 name ?= model
 
@@ -13,7 +13,7 @@ evaluate:
 	uv run scripts/evaluate.py --model $(name) --all
 
 shapley:
-	uv run scripts/shapley_analysis.py --model $(name) --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
+	uv run scripts/analysis/shapley_analysis.py --model $(name) --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
 
 counterfactual:
 	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 30 --months 1200
@@ -34,6 +34,15 @@ shapley-ensemble-robust:
 
 counterfactual-ensemble-robust:
 	uv run scripts/analysis/counterfactual_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 100 --months 1200 --no-wandb
+
+# --- Agent-free causal backbone + 3-method convergence figure ---
+# interventional_xro is agent-free; --prefix is a label so its output files
+# alongside the ensemble's so `convergence` can find all three npz inputs.
+interventional:
+	uv run scripts/analysis/interventional_xro.py --prefix $(name) --n-runs 30 --months 1200
+
+convergence:
+	uv run scripts/analysis/driver_convergence.py --prefix $(name)
 
 traj-ensemble:
 	uv run scripts/evaluate.py --model $(name)_seed0 --trajectory --no-wandb

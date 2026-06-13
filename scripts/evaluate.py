@@ -167,7 +167,7 @@ def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False):
 
 
 def run_interventional_analysis(model, env, var_names, disable_idx=None, num_months=1200,
-                                 n_runs=30, master_seed=42, wandb_enabled=False):
+                                 n_runs=30, master_seed=42, wandb_enabled=False, model_name="model"):
     """
     Run robust interventional analysis (ablation study) with N paired-seed trials.
     
@@ -300,11 +300,11 @@ def run_interventional_analysis(model, env, var_names, disable_idx=None, num_mon
     
     # === Robust Plot (matching notebook) ===
     print("\nGenerating robust interventional analysis plot...")
-    plot_robust_interventional(delta_r_values, n_runs, wandb_enabled)
-    print("[OK] Robust plot saved to plots/interventional_analysis_robust.png")
-    
+    plot_robust_interventional(delta_r_values, n_runs, wandb_enabled, model_name=model_name)
+    print(f"[OK] Robust plot saved to plots/{model_name}/interventional_analysis_robust.png")
+
     # Save numerical results
-    output_dir = Path("plots")
+    output_dir = Path("plots") / model_name
     output_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
         output_dir / 'interventional_results.npz',
@@ -487,7 +487,7 @@ def main():
         if args.all or args.intervention:
             run_interventional_analysis(model, env, var_names, num_months=args.months,
                                         n_runs=args.n_runs, master_seed=args.master_seed,
-                                        wandb_enabled=wandb_enabled)
+                                        wandb_enabled=wandb_enabled, model_name=args.model)
         
         if args.all or args.trajectory:
             run_trajectory_analysis(
