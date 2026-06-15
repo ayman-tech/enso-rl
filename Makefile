@@ -1,4 +1,4 @@
-.PHONY: train evaluate shapley counterfactual igi ensemble shapley-ensemble counterfactual-ensemble shapley-ensemble-robust counterfactual-ensemble-robust interventional interventional-robust convergence lift-ensemble lift-ensemble-robust precursor precursor-robust seasonality seasonality-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
+.PHONY: train evaluate shapley counterfactual igi ensemble shapley-single counterfactual-single shapley-robust counterfactual-robust interventional interventional-robust convergence lift-ensemble lift-ensemble-robust precursor precursor-robust seasonality seasonality-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
 
 name ?= model
 
@@ -12,67 +12,47 @@ ensemble:
 evaluate:
 	uv run scripts/evaluate.py --model $(name) --all
 
+# --- Lift (headline P(MYE) gain), agent-free validation, mechanism, policy-facing ---
+lift-ensemble:
+	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 600 --no-wandb
+lift-ensemble-robust:
+	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200 --no-wandb
+
+# =============== X-AI methods ================
 shapley:
-	uv run scripts/analysis/shapley_analysis.py --model $(name) --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
-
-counterfactual:
-	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 30 --months 1200
-
-# --- Quick variants (fast local iteration / sanity checks) ---
-# Shared across methods: same 10 seeds + 1200mo (so rankings are comparable).
-# Method-specific sampling (n-runs / n-permutations) tuned for speed here.
-shapley-ensemble:
 	uv run scripts/analysis/shapley_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 6 --n-permutations 6 --months 1200 --no-wandb
-
-counterfactual-ensemble:
-	uv run scripts/analysis/counterfactual_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 20 --months 1200 --no-wandb
-
-# --- Robust variants (paper-grade; run on cluster) ---
-# Same 10 seeds + 1200mo as the quick variants; sampling cranked to convergence.
-shapley-ensemble-robust:
+shapley-robust:
 	uv run scripts/analysis/shapley_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 30 --n-permutations 30 --months 1200 --no-wandb
 
-counterfactual-ensemble-robust:
+counterfactual:
+	uv run scripts/analysis/counterfactual_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 20 --months 1200 --no-wandb
+counterfactual-robust:
 	uv run scripts/analysis/counterfactual_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 100 --months 1200 --no-wandb
 
 # --- Agent-free causal backbone + 3-method convergence figure ---
-# interventional_xro is agent-free; --prefix is a label so its output files
-# alongside the ensemble's so `convergence` can find all three npz inputs.
+# interventional_xro is agent-free; --prefix is a label so its output files alongside the ensemble's so `convergence` can find all three npz inputs.
 interventional:
 	uv run scripts/analysis/interventional_xro.py --prefix $(name) --n-runs 30 --months 1200
-
 interventional-robust:
 	uv run scripts/analysis/interventional_xro.py --prefix $(name) --n-runs 50 --months 1200 --mode press --direction both
 
 convergence:
 	uv run scripts/analysis/driver_convergence.py --prefix $(name)
 
-# --- Lift (headline P(MYE) gain), agent-free validation, mechanism, policy-facing ---
-# lift_analysis is ensemble-aware (CIs across seeds). quick = fewer/shorter rollouts.
-lift-ensemble:
-	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 600 --no-wandb
-
-lift-ensemble-robust:
-	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200 --no-wandb
-
+# ================== Other Analysis ===================
 # precursor_composite is agent-free (no model); validates drivers vs spontaneous MYE (2.1).
 precursor:
 	uv run scripts/analysis/precursor_composite.py --prefix $(name) --n-runs 30 --months 1200 --lead 24
-
 precursor-robust:
 	uv run scripts/analysis/precursor_composite.py --prefix $(name) --n-runs 100 --months 2400 --lead 24
 
 # seasonality_of_control bins the agent's scaled forcing by calendar month x mode (2.8).
 seasonality:
 	uv run scripts/analysis/seasonality_of_control.py --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --months 1200
-
 seasonality-robust:
 	uv run scripts/analysis/seasonality_of_control.py --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --months 6000
 
-# --- Aggregate result pipelines (run on an already-trained ensemble: name=<prefix>) ---
-# Order matters: counterfactual + shapley + interventional must finish BEFORE
-# convergence (it reads their .npz). Sub-make calls guarantee serial order and
-# propagate `name`, while reusing the existing per-method targets above.
+# Aggregate result pipelines (run on an already-trained ensemble: name=<prefix>)
 results-quick:
 	$(MAKE) lift-ensemble name=$(name)
 	$(MAKE) counterfactual-ensemble name=$(name)
@@ -117,3 +97,9 @@ policy-facing-robust:
 	uv run scripts/analysis/mutual_information.py   --model $(name)_seed0 --months 6000
 	uv run scripts/analysis/gradient_sensitivity.py --model $(name)_seed0 --months 1200 --n-runs 30
 	uv run scripts/analysis/integrated_gradients.py --model $(name)_seed0 --months 1200 --n-runs 30 --n-samples 200
+
+# single model analysis
+shapley-single:
+	uv run scripts/analysis/shapley_analysis.py --model $(name) --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
+counterfactual-single:
+	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 30 --months 1200
