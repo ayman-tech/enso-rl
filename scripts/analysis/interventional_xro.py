@@ -75,7 +75,7 @@ def build_env():
 
 
 def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
-            mode='press', state_std=None):
+            mode='press', state_std=None, return_states=False):
     """One free-running rollout, optionally perturbing target modes.
 
     Args:
@@ -83,8 +83,12 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
                      None -> pure baseline (zero actions).
         magnitude: signed perturbation size. press: action units; pulse: sigma units.
         mode: 'press' (every step) or 'pulse' (t0 offset only).
+        return_states: if True, also return the full per-month state trajectory
+                       (shape [num_months+1, n_modes]) and the Nino3.4 history,
+                       for downstream analyses such as precursor composites (2.1).
     Returns:
-        dict phase fractions from mye_fraction_by_phase.
+        dict phase fractions from mye_fraction_by_phase; or, if return_states,
+        the tuple (fractions, states, enso_history).
     """
     obs, _ = env.reset(seed=seed)
 
@@ -95,6 +99,7 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
         obs = env._get_obs()
 
     enso_history = [obs[0]]
+    states = [env.state.copy()] if return_states else None
     action_vec = np.zeros(env.action_space.shape, dtype=np.float32)
     if mode == 'press' and action_idxs is not None:
         for ai in action_idxs:
@@ -104,9 +109,14 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
         obs, _, _, _, _ = env.step(action_vec if mode == 'press' else
                                    np.zeros(env.action_space.shape, dtype=np.float32))
         enso_history.append(obs[0])
+        if return_states:
+            states.append(env.state.copy())
 
     classified = classify_enso_event(enso_history, threshold=env.threshold)
-    return mye_fraction_by_phase(classified)
+    fractions = mye_fraction_by_phase(classified)
+    if return_states:
+        return fractions, np.asarray(states), np.asarray(enso_history)
+    return fractions
 
 
 def paired_delta(env, targets, var_names, n_runs, months, magnitude, mode,
