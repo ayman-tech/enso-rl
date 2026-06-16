@@ -1,4 +1,4 @@
-.PHONY: train evaluate shapley counterfactual igi ensemble shapley-single counterfactual-single shapley-robust counterfactual-robust interventional interventional-robust convergence lift-ensemble lift-ensemble-robust precursor precursor-robust seasonality seasonality-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
+.PHONY: train evaluate shapley counterfactual igi ensemble shapley-single counterfactual-single shapley-robust counterfactual-robust interventional interventional-robust convergence lift lift-robust precursor precursor-robust seasonality seasonality-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
 
 name ?= model
 
@@ -13,9 +13,9 @@ evaluate:
 	uv run scripts/evaluate.py --model $(name) --all
 
 # --- Lift (headline P(MYE) gain), agent-free validation, mechanism, policy-facing ---
-lift-ensemble:
+lift:
 	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 600 --no-wandb
-lift-ensemble-robust:
+lift-robust:
 	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200 --no-wandb
 
 # =============== X-AI methods ================
@@ -54,9 +54,9 @@ seasonality-robust:
 
 # Aggregate result pipelines (run on an already-trained ensemble: name=<prefix>)
 results-quick:
-	$(MAKE) lift-ensemble name=$(name)
-	$(MAKE) counterfactual-ensemble name=$(name)
-	$(MAKE) shapley-ensemble name=$(name)
+	$(MAKE) lift name=$(name)
+	$(MAKE) counterfactual name=$(name)
+	$(MAKE) shapley name=$(name)
 	$(MAKE) interventional name=$(name)
 	$(MAKE) convergence name=$(name)
 	$(MAKE) precursor name=$(name)
@@ -64,9 +64,9 @@ results-quick:
 	$(MAKE) policy-facing name=$(name)
 
 results-robust:
-	$(MAKE) lift-ensemble-robust name=$(name)
-	$(MAKE) counterfactual-ensemble-robust name=$(name)
-	$(MAKE) shapley-ensemble-robust name=$(name)
+	$(MAKE) lift-robust name=$(name)
+	$(MAKE) counterfactual-robust name=$(name)
+	$(MAKE) shapley-robust name=$(name)
 	$(MAKE) interventional-robust name=$(name)
 	$(MAKE) convergence name=$(name)
 	$(MAKE) precursor-robust name=$(name)

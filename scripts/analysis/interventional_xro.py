@@ -28,6 +28,8 @@ Usage:
 import sys
 import time
 import argparse
+import multiprocessing as mp
+from multiprocessing import cpu_count
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -119,37 +121,98 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
     return fractions
 
 
-def paired_delta(env, targets, var_names, n_runs, months, magnitude, mode,
-                 direction, state_std, master_seed):
-    """For each target & direction, paired ΔP(MYE) per phase across n_runs seeds.
+# Worker-process cache: the agent-free env is rebuilt once per worker (via the
+# Pool initializer) and reused across every (target, sign) task it handles.
+_WORKER_ENV = {}
 
-    Returns: list of dicts with per-(target,direction,phase) stats.
+
+def _init_worker():
+    """Pool initializer: build the XRO env once per worker process."""
+    suppress_warnings()
+    env, var_names, state_std = build_env()
+    _WORKER_ENV['env'] = env
+    _WORKER_ENV['var_names'] = var_names
+    _WORKER_ENV['state_std'] = state_std
+
+
+def _compute_target_sign(env, var_names, state_std, tname, modes, sgn,
+                         n_runs, months, magnitude, mode, master_seed):
+    """Paired ΔP(MYE) per phase for ONE (target, sign), across n_runs seeds.
+
+    Seeds are regenerated from master_seed, so the result is identical whether
+    this runs serially or in a worker, and independent of task order. Returns
+    the list of per-phase row dicts for this (target, sign).
     """
     rng = np.random.default_rng(master_seed)
     seeds = [int(rng.integers(0, 2**31)) for _ in range(n_runs)]
     name_to_idx = {v: i for i, v in enumerate(var_names[1:])}
+    idxs = [name_to_idx[m] for m in modes]
 
-    signs = {'both': [1.0, -1.0], 'pos': [1.0], 'neg': [-1.0]}[direction]
+    deltas = {p: np.zeros(n_runs) for p in PHASES}
+    for i, seed in enumerate(seeds):
+        base = rollout(env, months, seed, None, 0.0, mode, state_std)
+        pert = rollout(env, months, seed, idxs, sgn * magnitude, mode, state_std)
+        for p in PHASES:
+            deltas[p][i] = pert[p] - base[p]
 
     rows = []
-    for tname, modes in targets:
-        idxs = [name_to_idx[m] for m in modes]
-        for sgn in signs:
-            deltas = {p: np.zeros(n_runs) for p in PHASES}
-            for i, seed in enumerate(seeds):
-                base = rollout(env, months, seed, None, 0.0, mode, state_std)
-                pert = rollout(env, months, seed, idxs, sgn * magnitude, mode, state_std)
-                for p in PHASES:
-                    deltas[p][i] = pert[p] - base[p]
-            for p in PHASES:
-                d = deltas[p]
-                mean = float(d.mean())
-                se = d.std(ddof=1) / np.sqrt(n_runs) if n_runs > 1 else 0.0
-                ci = float(sp_stats.t.ppf(0.975, df=n_runs - 1) * se) if n_runs > 1 else 0.0
-                pval = (1.0 if (n_runs < 2 or np.allclose(d, 0))
-                        else float(sp_stats.ttest_1samp(d, 0.0)[1]))
-                rows.append({'target': tname, 'sign': '+' if sgn > 0 else '-',
-                             'phase': p, 'mean': mean, 'ci': ci, 'p': pval})
+    for p in PHASES:
+        d = deltas[p]
+        mean = float(d.mean())
+        se = d.std(ddof=1) / np.sqrt(n_runs) if n_runs > 1 else 0.0
+        ci = float(sp_stats.t.ppf(0.975, df=n_runs - 1) * se) if n_runs > 1 else 0.0
+        pval = (1.0 if (n_runs < 2 or np.allclose(d, 0))
+                else float(sp_stats.ttest_1samp(d, 0.0)[1]))
+        rows.append({'target': tname, 'sign': '+' if sgn > 0 else '-',
+                     'phase': p, 'mean': mean, 'ci': ci, 'p': pval})
+    return rows
+
+
+def _worker_target_sign(task):
+    """Worker entry: compute one (target, sign) using the per-worker cached env."""
+    tname, modes, sgn, n_runs, months, magnitude, mode, master_seed = task
+    rows = _compute_target_sign(
+        _WORKER_ENV['env'], _WORKER_ENV['var_names'], _WORKER_ENV['state_std'],
+        tname, modes, sgn, n_runs, months, magnitude, mode, master_seed)
+    print(f"  [worker] {tname} {'+' if sgn > 0 else '-'} done", flush=True)
+    return tname, sgn, rows
+
+
+def paired_delta(env, targets, var_names, n_runs, months, magnitude, mode,
+                 direction, state_std, master_seed, n_workers=1):
+    """For each target & direction, paired ΔP(MYE) per phase across n_runs seeds.
+
+    (target, sign) combinations are independent and parallelized across processes
+    when n_workers > 1 (each worker builds its own env via the Pool initializer).
+    Rows are reassembled in deterministic (target, sign) order, so the output is
+    identical to the serial path. Returns (rows, seeds).
+    """
+    signs = {'both': [1.0, -1.0], 'pos': [1.0], 'neg': [-1.0]}[direction]
+    tasks = [(tname, modes, sgn, n_runs, months, magnitude, mode, master_seed)
+             for tname, modes in targets for sgn in signs]
+
+    if n_workers > 1:
+        print(f"  Parallel across {len(tasks)} (target,sign) tasks with "
+              f"{n_workers} workers", flush=True)
+        with mp.Pool(processes=n_workers, initializer=_init_worker) as pool:
+            results = pool.map(_worker_target_sign, tasks)
+    else:
+        print("  Serial (workers=1)", flush=True)
+        results = [(t[0], t[2],
+                    _compute_target_sign(env, var_names, state_std,
+                                         t[0], t[1], t[2], n_runs, months,
+                                         magnitude, mode, master_seed))
+                   for t in tasks]
+
+    # Reassemble rows in task (target, sign) order, independent of completion order.
+    key_to_rows = {(tname, sgn): rows for tname, sgn, rows in results}
+    rows = []
+    for tname, _modes, sgn, *_ in tasks:
+        rows.extend(key_to_rows[(tname, sgn)])
+
+    # Seeds (provenance) regenerated identically to the per-task seeds.
+    rng = np.random.default_rng(master_seed)
+    seeds = [int(rng.integers(0, 2**31)) for _ in range(n_runs)]
     return rows, seeds
 
 
@@ -194,6 +257,9 @@ def _plot(rows, output_dir, mode, direction):
 
 
 def main():
+    # Use 'spawn' to avoid fork-related issues (matches the other analyses).
+    mp.set_start_method('spawn', force=True)
+
     parser = argparse.ArgumentParser(description="Agent-free interventional analysis on XRO")
     parser.add_argument("--n-runs", type=int, default=30, help="Paired seeds")
     parser.add_argument("--months", type=int, default=1200, help="Months per rollout")
@@ -207,6 +273,9 @@ def main():
     parser.add_argument("--prefix", type=str, default="rl_model",
                         help="Namespace label (match the ensemble prefix so the "
                              "convergence figure finds this output)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel workers across (target,sign) tasks "
+                             "(default: cpu_count - 2; 1 = serial)")
     args = parser.parse_args()
 
     suppress_warnings()
@@ -227,13 +296,18 @@ def main():
         targets += [(m, [m]) for m in modes]
     targets += [(gname, gmodes) for gname, gmodes in GROUPS.items()]
 
+    n_signs = {'both': 2, 'pos': 1, 'neg': 1}[args.direction]
+    n_tasks = len(targets) * n_signs
+    n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
+    n_workers = min(n_workers, n_tasks)  # no more workers than tasks
+
     print(f"  N_RUNS={args.n_runs} MONTHS={args.months} MODE={args.mode} "
-          f"MAG={args.magnitude} DIR={args.direction}")
+          f"MAG={args.magnitude} DIR={args.direction} WORKERS={n_workers}")
     print(f"  targets: {[t[0] for t in targets]}")
 
     rows, seeds = paired_delta(env, targets, var_names, args.n_runs, args.months,
                                args.magnitude, args.mode, args.direction,
-                               state_std, args.master_seed)
+                               state_std, args.master_seed, n_workers=n_workers)
     _print_table(rows, args.n_runs)
     _plot(rows, output_dir, args.mode, args.direction)
 
