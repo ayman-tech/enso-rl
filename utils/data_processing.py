@@ -59,10 +59,20 @@ def prepare_xro_parameters(model, train_ds, var_names, bounds):
     residuals = fitted_params['Y'] - fitted_params['Yfit']
     noise_cov = np.cov(residuals.values, rowvar=True)
     
+    # Precompute the 12 calendar-month rolls of fit_ds once. xro_step needs the
+    # roll aligned to step % 12 every month; there are only 12 distinct rolls, so
+    # caching them here avoids re-rolling the xarray Dataset on every env step
+    # (a large per-step cost across all rollout-based analyses). The cached rolls
+    # are identical to the per-step roll and are used read-only by model.simulate.
+    fit_ds_rolled = [
+        fitted_params.roll(cycle=-m, roll_coords=False) for m in range(12)
+    ]
+
     # Create params dictionary
     params = {
         'model': model,
         'fit_ds': fitted_params,
+        'fit_ds_rolled': fit_ds_rolled,
         'noise_cov': noise_cov,
         'var_names': var_names,
         'bounds': bounds,

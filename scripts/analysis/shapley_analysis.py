@@ -349,11 +349,54 @@ PHASE_METRICS = {'total': 'mye_prob', 'el_nino': 'mye_prob_el_nino',
                  'la_nina': 'mye_prob_la_nina'}
 
 
+def _worker_shapley_ensemble(worker_args):
+    """Worker: one trained seed -> mean Shapley per feature, for every phase.
+
+    Each worker loads its own model/env (spawn-safe) and seeds np.random
+    deterministically from the trained seed, so permutation sampling is
+    reproducible and INDEPENDENT of execution order. That determinism is what
+    makes the ensemble parallelizable: the previous version threaded a single
+    global RNG through nested loops (order-dependent), so it could not be split
+    across processes. The Shapley methodology, env seeds, permutation count, and
+    per-phase handling are all unchanged; only the permutation stream is now
+    seeded per trained seed instead of one continuous global stream. Returns
+    (trained_seed, {phase: mean_sv}) or (seed, None) if the model is missing.
+    """
+    s, model_name, months, n_runs, n_permutations, master_seed, env_seeds = worker_args
+
+    from utils import suppress_warnings
+    suppress_warnings()
+    # Deterministic, order-independent permutation stream for this trained seed.
+    np.random.seed(master_seed + 1 + s)
+
+    try:
+        model, env = load_environment(model_name)
+    except FileNotFoundError:
+        return s, None
+
+    phases = list(PHASE_METRICS.keys())
+    feat = ACTION_NAMES
+    out = {}
+    for p in phases:
+        sv_runs = np.zeros((n_runs, len(feat)))
+        for ri, es in enumerate(env_seeds):
+            sv, _ = compute_shapley_for_seed(env, model, months,
+                                             n_permutations, es,
+                                             metric=PHASE_METRICS[p])
+            sv_runs[ri] = sv
+        out[p] = sv_runs.mean(axis=0)
+    print(f"  [worker] seed={s} done", flush=True)
+    return s, out
+
+
 def run_ensemble(args, output_dir):
     """Cross-seed, phase-resolved Shapley: per-seed mean SV -> CIs across seeds.
 
-    For each trained seed model and each phase, compute the mean Shapley vector
-    over args.n_runs env seeds, then aggregate (mean + t-CI) across trained seeds.
+    Trained seeds are independent, so per-seed work is parallelized across
+    processes (--workers; default cpu_count-2, 1 = serial). Permutation sampling
+    is seeded deterministically per trained seed inside each worker, so the
+    serial and parallel paths produce identical results; aggregation across
+    seeds happens here in deterministic seed order.
     Saves shapley_ensemble.npz for the convergence figure (Part D).
     """
     from scipy.stats import t as t_dist
@@ -365,23 +408,32 @@ def run_ensemble(args, output_dir):
     env_rng = np.random.default_rng(args.master_seed)
     env_seeds = [int(env_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
 
+    n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
+    n_workers = min(n_workers, len(args.seeds))  # no more workers than tasks
+
+    worker_args = [(s, f"{args.prefix}_seed{s}", args.months, args.n_runs,
+                    args.n_permutations, args.master_seed, env_seeds)
+                   for s in args.seeds]
+
+    if n_workers > 1:
+        print(f"  Parallel across {len(args.seeds)} seeds with {n_workers} workers", flush=True)
+        with mp.Pool(processes=n_workers) as pool:
+            results = pool.map(_worker_shapley_ensemble, worker_args)
+    else:
+        print("  Serial (workers=1)", flush=True)
+        results = [_worker_shapley_ensemble(wa) for wa in worker_args]
+
+    # Aggregate in deterministic seed order (independent of completion order).
+    by_seed = {r[0]: r for r in results}
     for s in args.seeds:
-        name = f"{args.prefix}_seed{s}"
-        try:
-            model, env = load_environment(name)
-        except FileNotFoundError:
-            print(f"  [skip] models/{name}.zip not found")
+        _, out = by_seed[s]
+        if out is None:
+            print(f"  [skip] models/{args.prefix}_seed{s}.zip not found", flush=True)
             continue
         for p in phases:
-            sv_runs = np.zeros((args.n_runs, len(feat)))
-            for ri, es in enumerate(env_seeds):
-                sv, _ = compute_shapley_for_seed(env, model, args.months,
-                                                 args.n_permutations, es,
-                                                 metric=PHASE_METRICS[p])
-                sv_runs[ri] = sv
-            per_seed[p].append(sv_runs.mean(axis=0))
+            per_seed[p].append(out[p])
         used.append(s)
-        print(f"  seed={s} done")
+        print(f"  seed={s} done", flush=True)
 
     if not used:
         raise FileNotFoundError("No ensemble models found (scripts/train_ensemble.py first).")
@@ -434,9 +486,9 @@ def main():
         np.random.seed(args.master_seed)
         out = Path("plots") / args.prefix / "shapley" / "ensemble"
         out.mkdir(parents=True, exist_ok=True)
-        print("=" * 70)
-        print("SHAPLEY — ENSEMBLE (cross-seed, phase-resolved)")
-        print("=" * 70)
+        print("=" * 70, flush=True)
+        print("SHAPLEY — ENSEMBLE (cross-seed, phase-resolved)", flush=True)
+        print("=" * 70, flush=True)
         run_ensemble(args, out)
         return
 
