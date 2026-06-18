@@ -61,7 +61,6 @@ results-quick:
 	$(MAKE) convergence name=$(name)
 	$(MAKE) precursor name=$(name)
 	$(MAKE) seasonality name=$(name)
-	$(MAKE) policy-facing name=$(name)
 
 results-robust:
 	$(MAKE) lift-robust name=$(name)
@@ -71,7 +70,6 @@ results-robust:
 	$(MAKE) convergence name=$(name)
 	$(MAKE) precursor-robust name=$(name)
 	$(MAKE) seasonality-robust name=$(name)
-	$(MAKE) policy-facing-robust name=$(name)
 
 traj-ensemble:
 	uv run scripts/evaluate.py --model $(name)_seed0 --trajectory --no-wandb

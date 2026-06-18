@@ -112,26 +112,48 @@ def _plot(abs_by_month, total_by_month, var_names, output_dir, label):
     fig, (ax_h, ax_b) = plt.subplots(
         1, 2, figsize=(16, 6), gridspec_kw={'width_ratios': [2.2, 1]})
 
-    # Heatmap: months (x) x modes (y)
-    im = ax_h.imshow(abs_by_month.T, aspect='auto', cmap='viridis', origin='lower')
+    # The modes live on very different native scales (e.g. WWV's |forcing| is ~6x
+    # any other mode in its own units), so a shared-scale heatmap of raw values
+    # makes every mode but WWV look like zero. Normalize each mode (row) to its OWN
+    # max so the *seasonal pattern* of every mode is visible; keep the absolute mean
+    # magnitude in the y-tick label so cross-mode scale is not lost.
+    abs_T = abs_by_month.T                                   # [n_modes, 12]
+    row_max = abs_T.max(axis=1, keepdims=True)
+    row_norm = np.divide(abs_T, row_max, out=np.zeros_like(abs_T), where=row_max > 0)
+    abs_mean = abs_T.mean(axis=1)                            # per-mode absolute mean
+
+    im = ax_h.imshow(row_norm, aspect='auto', cmap='viridis', origin='lower',
+                     vmin=0.0, vmax=1.0)
     ax_h.set_xticks(range(12)); ax_h.set_xticklabels(MONTHS)
-    ax_h.set_yticks(range(len(drivers))); ax_h.set_yticklabels(drivers)
-    ax_h.set_title('Mean |scaled forcing| by calendar month x mode')
+    ax_h.set_yticks(range(len(drivers)))
+    ax_h.set_yticklabels([f'{d}  (μ={abs_mean[i]:.2f})' for i, d in enumerate(drivers)])
+    ax_h.set_title('Seasonal pattern of forcing\n(each mode normalized to its own max; '
+                   'μ = abs. mean in native units)')
     for m in SPRING_BARRIER:  # outline the spring-barrier columns
         ax_h.axvline(m - 0.5, color='red', lw=1.0, ls='--', alpha=0.7)
         ax_h.axvline(m + 0.5, color='red', lw=1.0, ls='--', alpha=0.7)
-    fig.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04, label='|scaled action|')
+    fig.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04,
+                 label="|forcing| / mode's own max")
 
-    # Marginal: total forcing by month, spring barrier shaded
-    bars = ax_b.bar(range(12), total_by_month, color='steelblue', edgecolor='black')
-    for m in SPRING_BARRIER:
-        bars[m].set_color('#D32F2F')
-    ax_b.set_xticks(range(12)); ax_b.set_xticklabels(MONTHS, rotation=45)
-    ax_b.axhline(total_by_month.mean(), color='gray', ls='--', lw=0.8,
-                 label='annual mean')
-    ax_b.set_ylabel('Total |scaled forcing| (sum over modes)')
-    ax_b.set_title('Seasonal control intensity\n(red = spring barrier)')
-    ax_b.legend(fontsize=9)
+    # Right panel: compare the seasonal *timing* of two intensity measures, each
+    # rescaled to [0,1] so the shapes are comparable:
+    #   (a) raw total (sum over modes) — dominated by WWV's large native units;
+    #   (b) mode-balanced — mean over modes of the per-mode-normalized forcing.
+    balanced = row_norm.mean(axis=0)                         # [12], mode-balanced
+    total_s = total_by_month / total_by_month.max() if total_by_month.max() > 0 else total_by_month
+    bal_s = balanced / balanced.max() if balanced.max() > 0 else balanced
+    w = 0.4
+    x = np.arange(12)
+    b1 = ax_b.bar(x - w / 2, total_s, w, label='raw total (WWV-dominated)',
+                  color='steelblue', edgecolor='black')
+    b2 = ax_b.bar(x + w / 2, bal_s, w, label='mode-balanced',
+                  color='#66BB6A', edgecolor='black')
+    for m in SPRING_BARRIER:  # mark spring barrier on both series
+        b1[m].set_color('#D32F2F'); b2[m].set_color('#AD1457')
+    ax_b.set_xticks(x); ax_b.set_xticklabels(MONTHS, rotation=45)
+    ax_b.set_ylabel('Seasonal intensity (each series ÷ its own max)')
+    ax_b.set_title('Seasonal timing of control\n(red/maroon = spring barrier)')
+    ax_b.legend(fontsize=8)
     ax_b.grid(axis='y', alpha=0.3)
 
     fig.suptitle(f'Seasonality of control — {label}', fontsize=14)

@@ -68,19 +68,37 @@ def load_shapley(phase, sh_npz):
     return dict(zip(feats, d[f'mean_{phase}']))
 
 
-def load_interventional(phase, iv_npz, sign='+'):
-    """Agent-free: pick the requested sign; value = ΔP(MYE) (higher = adds MYE)."""
+def load_interventional(phase, iv_npz, sign='sustain'):
+    """Agent-free ΔP(MYE) per target for a phase; value = ΔP (higher = adds MYE).
+
+    sign='+'/'-': use that fixed perturbation direction.
+    sign='sustain' (default): per target, take the direction that maximally
+        *sustains* this phase, i.e. max(ΔP₊, ΔP₋). Each mode's sustaining
+        direction is mode- and phase-specific (e.g. for multi-year La Niña the
+        inter-basin modes IOB/TNA/IOD/ATL3 sustain with +, while WWV/PMM/SIOD/SASD
+        sustain with −), so any single global sign mis-ranks half the modes. The
+        sustaining-direction value is the quantity directly comparable to the
+        counterfactual/Shapley sustainer strength, so it is the correct input for
+        the convergence overlay and Spearman.
+    """
     if not iv_npz.exists():
         return None
     d = np.load(iv_npz, allow_pickle=True)
     targets = [str(t) for t in d['targets']]
     signs = [str(s) for s in d['signs']]
     phases = [str(p) for p in d['phases']]
-    out = {}
-    for t, s, p, m in zip(targets, signs, phases, d['mean']):
-        if s == sign and p == phase:
-            out[t] = float(m)
-    return out
+    means = d['mean']
+
+    if sign in ('+', '-'):
+        return {t: float(m) for t, s, p, m in zip(targets, signs, phases, means)
+                if s == sign and p == phase}
+
+    # 'sustain': per target, the larger ΔP across the available ± directions.
+    by_target = {}
+    for t, s, p, m in zip(targets, signs, phases, means):
+        if p == phase:
+            by_target.setdefault(t, []).append(float(m))
+    return {t: max(vals) for t, vals in by_target.items()}
 
 
 def main():
@@ -88,8 +106,9 @@ def main():
     ap.add_argument("--prefix", type=str, default="rl_model",
                     help="Ensemble prefix; reads plots/<prefix>/ and writes there")
     ap.add_argument("--phase", choices=PHASES + ['all'], default='all')
-    ap.add_argument("--iv-sign", choices=['+', '-'], default='+',
-                    help="Which interventional perturbation sign to use")
+    ap.add_argument("--iv-sign", choices=['+', '-', 'sustain'], default='sustain',
+                    help="Interventional direction: 'sustain' (default; per-mode "
+                         "sustaining direction, max of ±) or a fixed '+'/'-'")
     args = ap.parse_args()
 
     cf_npz, sh_npz, iv_npz = npz_paths(args.prefix)
@@ -102,8 +121,9 @@ def main():
         sh = load_shapley(phase, sh_npz)
         iv = load_interventional(phase, iv_npz, args.iv_sign)
 
+        iv_label = {'+': '+ΔP', '-': '-ΔP', 'sustain': 'sustaining ΔP'}[args.iv_sign]
         methods = {'Counterfactual (-ΔP)': cf, 'Shapley': sh,
-                   f'Interventional ({args.iv_sign}ΔP)': iv}
+                   f'Interventional ({iv_label})': iv}
         avail = {k: v for k, v in methods.items() if v}
         if len(avail) < 2:
             print(f"[{phase}] need >=2 methods present; found {list(avail)}. "
