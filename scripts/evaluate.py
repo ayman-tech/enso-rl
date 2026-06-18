@@ -3,6 +3,7 @@ Evaluation script for trained ENSO RL agent.
 - Basic for With RL vs without RL
 - Trajectory for plotting traj
 - intervention for ablation study results
+- lift for phase-resolved MYE lift (single model)
 
 Usage:
     uv run scripts/evaluate.py --model ppo_enso_model
@@ -11,6 +12,14 @@ Usage:
     uv run scripts/evaluate.py --model model --basic
     uv run scripts/evaluate.py --model model --intervention
     uv run scripts/evaluate.py --model model --trajectory
+
+    # Phase-resolved MYE lift, SINGLE model (logs into this eval's W&B run):
+    uv run scripts/evaluate.py --model model --lift --n-rollouts 100 --months 1200
+
+    # For the ENSEMBLE lift (the publishable number, many seeds), use the
+    # standalone script instead:
+    #   uv run scripts/analysis/lift_analysis.py --ensemble --prefix rl_model \
+    #       --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200
 """
 import sys
 import time
@@ -32,6 +41,7 @@ from stable_baselines3 import PPO
 from config import EnvConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.evaluation import evaluate_agent, simulate_trajectory
+from scripts.analysis.lift_analysis import run_lift_evaluation
 from utils.visualization import (
     plot_control_actions, plot_state_variables,
     plot_robust_interventional, plot_nino_classification,
@@ -157,7 +167,7 @@ def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False):
 
 
 def run_interventional_analysis(model, env, var_names, disable_idx=None, num_months=1200,
-                                 n_runs=30, master_seed=42, wandb_enabled=False):
+                                 n_runs=30, master_seed=42, wandb_enabled=False, model_name="model"):
     """
     Run robust interventional analysis (ablation study) with N paired-seed trials.
     
@@ -290,11 +300,11 @@ def run_interventional_analysis(model, env, var_names, disable_idx=None, num_mon
     
     # === Robust Plot (matching notebook) ===
     print("\nGenerating robust interventional analysis plot...")
-    plot_robust_interventional(delta_r_values, n_runs, wandb_enabled)
-    print("[OK] Robust plot saved to plots/interventional_analysis_robust.png")
-    
+    plot_robust_interventional(delta_r_values, n_runs, wandb_enabled, model_name=model_name)
+    print(f"[OK] Robust plot saved to plots/{model_name}/interventional_analysis_robust.png")
+
     # Save numerical results
-    output_dir = Path("plots")
+    output_dir = Path("plots") / model_name
     output_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
         output_dir / 'interventional_results.npz',
@@ -312,10 +322,10 @@ def run_interventional_analysis(model, env, var_names, disable_idx=None, num_mon
     return delta_r_values
 
 
-def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5, wandb_enabled=False):
+def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5, wandb_enabled=False, model_name="model"):
     """
     Run trajectory analysis and visualization.
-    
+
     Args:
         model: Trained model
         env: Environment
@@ -323,10 +333,14 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
         num_months (int): Duration of simulation
         threshold (float): ENSO event threshold from env_config
         wandb_enabled (bool): Whether W&B is enabled
-        
+        model_name (str): Name of the model (used to namespace output dir)
+
     Returns:
         dict: Simulation data and trajectory dataframe
     """
+    # Per-model output dir so parallel/repeated runs don't overwrite each other
+    out_dir = Path("plots") / model_name
+    out_dir.mkdir(parents=True, exist_ok=True)
     print("\n" + "="*70)
     print("TRAJECTORY ANALYSIS")
     print("="*70)
@@ -376,32 +390,32 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
     
     # Save to CSV
     output_file = "trajectory_analysis.csv"
-    trajectory_df.to_csv(output_file, index=False)
-    print(f"\n[OK] Trajectory data saved to {output_file}")
+    # trajectory_df.to_csv(output_file, index=False)
+    # print(f"\n[OK] Trajectory data saved to {output_file}")
     
     # Generate plots
     print("\nGenerating visualization plots...")
-    plot_control_actions(sim['actions_traj'], var_names, num_months=num_months, wandb_enabled=wandb_enabled)
-    plot_state_variables(sim['states_traj'][:-1], var_names, threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
-    plot_nino_classification(sim['enso_traj'], sim['classified_event_array'], threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
+    # plot_control_actions(sim['actions_traj'], var_names, num_months=num_months, wandb_enabled=wandb_enabled)
+    # plot_state_variables(sim['states_traj'][:-1], var_names, threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled)
+    plot_nino_classification(sim['enso_traj'], sim['classified_event_array'], threshold=threshold, num_months=num_months, wandb_enabled=wandb_enabled, model_name=model_name)
     
     # Generate KDE plots by event type
     print("Generating KDE plots by event type...")
-    plot_action_kde_by_event(sim['actions_traj'], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
-    plot_state_kde_by_event(sim['states_traj'][:-1], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
+    # plot_action_kde_by_event(sim['actions_traj'], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
+    # plot_state_kde_by_event(sim['states_traj'][:-1], sim['classified_event_array'], var_names, wandb_enabled=wandb_enabled)
     
     print("[OK] Plots saved to plots/ folder and logged to W&B")
     
     # Generate ENSO table with colors
     print("\nGenerating ENSO index table...")
-    save_enso_table_html(sim['enso_traj'], output_path="plots/enso_table.html", threshold=threshold, wandb_enabled=wandb_enabled)
-    save_enso_table_matplotlib(sim['enso_traj'], output_path="plots/enso_table.png", threshold=threshold)
+    # save_enso_table_html(sim['enso_traj'], output_path=str(out_dir / "enso_table.html"), threshold=threshold, wandb_enabled=wandb_enabled)
+    # save_enso_table_matplotlib(sim['enso_traj'], output_path=str(out_dir / "enso_table.png"), threshold=threshold)
     if wandb_enabled:
         log_enso_table_wandb(sim['enso_traj'], threshold=threshold)
-    
+
     print("[OK] ENSO table saved as HTML and PNG")
-    print("     → Open plots/enso_table.html in your browser for interactive table")
-    print("     → View plots/enso_table.png for image version")
+    print(f"     → Open {out_dir / 'enso_table.html'} in your browser for interactive table")
+    print(f"     → View {out_dir / 'enso_table.png'} for image version")
     
     return {'sim': sim, 'trajectory_df': trajectory_df}
 
@@ -414,6 +428,8 @@ def main():
     parser.add_argument("--basic", action="store_true", help="Run basic evaluation")
     parser.add_argument("--intervention", action="store_true", help="Run interventional analysis")
     parser.add_argument("--trajectory", action="store_true", help="Run trajectory analysis")
+    parser.add_argument("--lift", action="store_true", help="Run phase-resolved MYE lift analysis (1.1, 1.2)")
+    parser.add_argument("--n-rollouts", type=int, default=100, help="Paired rollouts for lift analysis")
     parser.add_argument("--all", action="store_true", help="Run all evaluations")
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
     parser.add_argument("--n-runs", type=int, default=30, help="Number of paired trials for interventional analysis")
@@ -422,7 +438,7 @@ def main():
     args = parser.parse_args()
     
     # Set to run all if none specified
-    if not (args.basic or args.intervention or args.trajectory):
+    if not (args.basic or args.intervention or args.trajectory or args.lift):
         args.all = True
     
     print("\n")
@@ -471,10 +487,20 @@ def main():
         if args.all or args.intervention:
             run_interventional_analysis(model, env, var_names, num_months=args.months,
                                         n_runs=args.n_runs, master_seed=args.master_seed,
-                                        wandb_enabled=wandb_enabled)
+                                        wandb_enabled=wandb_enabled, model_name=args.model)
         
         if args.all or args.trajectory:
-            run_trajectory_analysis(model, env, var_names, num_months=args.months, threshold=env_config.threshold, wandb_enabled=wandb_enabled)
+            run_trajectory_analysis(
+                model, env, var_names, num_months=args.months, 
+                threshold=env_config.threshold, wandb_enabled=wandb_enabled, 
+                model_name=args.model)
+
+        if args.all or args.lift:
+            # Phase-resolved MYE lift (1.1, 1.2). Logs into THIS evaluate run's
+            # wandb (run_lift_evaluation does not init/finish its own run).
+            run_lift_evaluation(model, env, n_rollouts=args.n_rollouts,
+                                months=args.months, master_seed=args.master_seed,
+                                label=args.model, wandb_log=wandb_enabled)
         
         # Finish W&B run
         if wandb_enabled and wandb.run is not None:

@@ -68,6 +68,31 @@ def classify_enso_event(enso_history, threshold=0.5, min_duration=12):
     return classifications
 
 
+def mye_fraction_by_phase(classified):
+    """Fraction of months in a multi-year ENSO event, split by phase.
+
+    Single source of truth for phase-resolved mye_prob, used by the lift analysis
+    and the driver-attribution scripts so every result uses the same definition.
+
+    Args:
+        classified (np.ndarray): Output of classify_enso_event (per-month labels).
+
+    Returns:
+        dict: {'total', 'el_nino', 'la_nina'} fractions of len(classified).
+    """
+    classified = np.asarray(classified)
+    n = len(classified)
+    if n == 0:
+        return {'total': 0.0, 'el_nino': 0.0, 'la_nina': 0.0}
+    el_nino = int(np.sum(classified == 'Multi-year El Nino'))
+    la_nina = int(np.sum(classified == 'Multi-year La Nina'))
+    return {
+        'total': (el_nino + la_nina) / n,
+        'el_nino': el_nino / n,
+        'la_nina': la_nina / n,
+    }
+
+
 def _find_continuous_runs(binary_sequence):
     """
     Find all continuous runs of 1s in a binary sequence.

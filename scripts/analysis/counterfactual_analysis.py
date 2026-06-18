@@ -20,6 +20,8 @@ Robust :
 import sys
 import time
 import argparse
+import multiprocessing as mp
+from multiprocessing import cpu_count
 import numpy as np
 import matplotlib.pyplot as plt
 import wandb
@@ -33,7 +35,7 @@ sys.path.insert(0, str(repo_root))
 from stable_baselines3 import PPO
 from config import EnvConfig, WandbConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
-from utils.enso_classifier import classify_enso_event
+from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
 from XRO.core import XRO
@@ -149,12 +151,13 @@ def simulate_counterfactual(env, model, num_months, seed,
         enso_history.append(obs[0])
 
     classified = classify_enso_event(enso_history)
-    mye_months = np.sum((classified == 'Multi-year El Nino') | (classified == 'Multi-year La Nina'))
-    mye_prob = mye_months / len(classified)
+    phase = mye_fraction_by_phase(classified)
 
     return {
         'avg_reward': total_reward / num_months,
-        'mye_prob': mye_prob,
+        'mye_prob': phase['total'],
+        'mye_prob_el_nino': phase['el_nino'],
+        'mye_prob_la_nina': phase['la_nina'],
     }
 
 
@@ -377,7 +380,132 @@ def plot_comparison(stats, n_runs, output_dir, metric='mye_prob'):
         })
 
 
+def _phase_keys():
+    return ['total', 'el_nino', 'la_nina']
+
+
+def _phase_field(result, phase):
+    return {'total': 'mye_prob', 'el_nino': 'mye_prob_el_nino',
+            'la_nina': 'mye_prob_la_nina'}[phase]
+
+
+def _worker_counterfactual(worker_args):
+    """Worker: one trained seed -> mean zero-ablation ΔP(MYE) per feature per phase.
+
+    Each worker loads its own model/env (spawn-safe); heavy imports happen here,
+    not in the main process. Numerically identical to the serial path — only the
+    independent per-seed work is distributed; cross-seed aggregation stays in main.
+    Returns (seed, controllable_vars or None, seed_means dict or None). A missing
+    model returns Nones so the parent can skip it, mirroring the serial behavior.
+    """
+    s, model_name, num_months, n_runs, master_seed = worker_args
+
+    from utils import suppress_warnings
+    suppress_warnings()
+
+    env_config = EnvConfig()
+    try:
+        model, env, var_names = load_environment(model_name, env_config)
+    except FileNotFoundError:
+        return s, None, None
+
+    seed_means = seed_mean_delta_by_phase(env, model, var_names,
+                                          num_months, n_runs, master_seed)
+    print(f"  [worker] seed={s} done", flush=True)
+    return s, list(var_names[1:]), seed_means
+
+
+def seed_mean_delta_by_phase(env, model, var_names, num_months, n_runs, master_seed):
+    """One trained model: mean zero-ablation ΔP(MYE) per feature per phase.
+
+    Zero-ablation (disable mode j's action) is the cleanest causal contrast for
+    the convergence figure. Paired by seed (baseline vs ablation share the seed).
+    Returns dict phase -> np.ndarray[n_features].
+    """
+    rng = np.random.default_rng(master_seed)
+    seeds = [int(rng.integers(0, 2**31)) for _ in range(n_runs)]
+    n_features = len(var_names) - 1
+    phases = _phase_keys()
+    deltas = {p: np.zeros((n_runs, n_features)) for p in phases}
+
+    for ri, seed in enumerate(seeds):
+        base = simulate_counterfactual(env, model, num_months, seed)
+        for fi in range(n_features):
+            abl = simulate_counterfactual(env, model, num_months, seed, zero_idx=fi)
+            for p in phases:
+                deltas[p][ri, fi] = abl[_phase_field(abl, p)] - base[_phase_field(base, p)]
+    return {p: deltas[p].mean(axis=0) for p in phases}
+
+
+def run_ensemble(args, output_dir):
+    """Cross-seed counterfactual: per-seed mean ΔP(MYE) -> CIs across seeds, per phase.
+
+    Seeds are independent, so the per-seed work is parallelized across processes
+    (mirrors shapley_analysis). --workers=1 runs serially. The result is identical
+    to the serial path: aggregation across seeds happens here, in deterministic
+    seed order, regardless of worker completion order.
+    """
+    from scipy.stats import t as t_dist
+    phases = _phase_keys()
+    per_seed = {p: [] for p in phases}  # each: list over seeds of [n_features]
+    controllable = None
+    used = []
+
+    n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
+    n_workers = min(n_workers, len(args.seeds))  # no more workers than tasks
+
+    worker_args = [(s, f"{args.prefix}_seed{s}", args.months, args.n_runs, args.seed)
+                   for s in args.seeds]
+
+    if n_workers > 1:
+        print(f"  Parallel across {len(args.seeds)} seeds with {n_workers} workers")
+        with mp.Pool(processes=n_workers) as pool:
+            results = pool.map(_worker_counterfactual, worker_args)
+    else:
+        print("  Serial (workers=1)")
+        results = [_worker_counterfactual(wa) for wa in worker_args]
+
+    # Aggregate in deterministic seed order (independent of completion order).
+    by_seed = {r[0]: r for r in results}
+    for s in args.seeds:
+        _, controllable_s, seed_means = by_seed[s]
+        if seed_means is None:
+            print(f"  [skip] models/{args.prefix}_seed{s}.zip not found")
+            continue
+        if controllable is None:
+            controllable = controllable_s
+        for p in phases:
+            per_seed[p].append(seed_means[p])
+        used.append(s)
+        print(f"  seed={s}: total ΔP top driver "
+              f"{controllable[int(np.argmin(seed_means['total']))]}")
+
+    if not used:
+        raise FileNotFoundError("No ensemble models found (scripts/train_ensemble.py first).")
+
+    n_seeds = len(used)
+    save_kw = {'features': np.array(controllable), 'phases': np.array(phases),
+               'seeds': np.array(used), 'n_runs': args.n_runs, 'months': args.months}
+    for p in phases:
+        M = np.vstack(per_seed[p])  # [n_seeds, n_features]
+        mean = M.mean(axis=0)
+        ci = (t_dist.ppf(0.975, df=n_seeds - 1) * M.std(axis=0, ddof=1) / np.sqrt(n_seeds)
+              if n_seeds > 1 else np.zeros_like(mean))
+        save_kw[f'mean_{p}'] = mean
+        save_kw[f'ci_{p}'] = ci
+        print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
+        order = np.argsort(mean)
+        for fi in order:
+            print(f"    {controllable[fi]:<10} {mean[fi]:+.4f} ± {ci[fi]:.4f}")
+
+    np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
+    print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
+
+
 def main():
+    # Use 'spawn' to avoid PyTorch fork deadlocks (matches shapley_analysis).
+    mp.set_start_method('spawn', force=True)
+
     parser = argparse.ArgumentParser(description="Counterfactual Trajectory Analysis")
     parser.add_argument("--model", type=str, default="rl_model", help="Path to trained model")
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
@@ -386,16 +514,34 @@ def main():
     parser.add_argument("--metric", type=str, default="mye_prob",
                         choices=["avg_reward", "mye_prob"],
                         help="Metric for analysis (default: mye_prob)")
+    parser.add_argument("--ensemble", action="store_true",
+                        help="Aggregate zero-ablation ΔP(MYE) across trained seeds, per phase")
+    parser.add_argument("--prefix", type=str, default="rl_model", help="Ensemble model prefix")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
+                        help="Ensemble seeds")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel workers for --ensemble across seeds "
+                             "(default: cpu_count - 2; use 1 to force serial)")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Disable W&B logging")
     args = parser.parse_args()
+
+    if args.ensemble:
+        suppress_warnings()
+        out = Path("plots") / args.prefix / "counterfactual" / "ensemble"
+        out.mkdir(parents=True, exist_ok=True)
+        print("=" * 70)
+        print("COUNTERFACTUAL — ENSEMBLE (cross-seed, phase-resolved)")
+        print("=" * 70)
+        run_ensemble(args, out)
+        return
 
     suppress_warnings()
     np.random.seed(args.seed)
 
     metric_label = METRIC_LABELS[args.metric]
 
-    output_dir = Path("plots/counterfactual") / args.metric
+    output_dir = Path("plots") / args.model / "counterfactual" / args.metric
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize W&B

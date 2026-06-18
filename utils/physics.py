@@ -23,12 +23,22 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
     """
     model = params['model']
     current_month_idx = step_idx % 12  # current month index
-    
-    # Roll parameters to align with the current calendar month
-    fit_ds = params['fit_ds'].roll(
-        cycle=-current_month_idx,
-        roll_coords=False
-    )
+
+    # Roll parameters to align with the current calendar month.
+    # There are only 12 distinct rolls (one per month); rolling the xarray
+    # Dataset every step is a major per-step cost, so prefer the precomputed
+    # cache built in prepare_xro_parameters. The roll is read-only downstream
+    # (only passed to model.simulate), so reusing cached views is equivalent
+    # to rolling fresh each step. Fall back to an on-the-fly roll if a caller
+    # built params without the cache.
+    rolled = params.get('fit_ds_rolled')
+    if rolled is not None:
+        fit_ds = rolled[current_month_idx]
+    else:
+        fit_ds = params['fit_ds'].roll(
+            cycle=-current_month_idx,
+            roll_coords=False
+        )
 
     var_names = params['var_names']
     bounds = params.get('bounds', {})

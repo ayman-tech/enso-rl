@@ -40,7 +40,40 @@ def evaluate_agent(env, agent=None, continuous_steps=6000):
     return mye_probability
 
 
-def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None, 
+def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
+    """Single rollout returning multi-year-ENSO probability split by phase.
+
+    Used by the lift analysis (paper points 1.1 quantified lift and 1.2 El Nino
+    vs La Nina separation). Pass the SAME seed for the agent and baseline rollouts
+    to get a paired comparison (identical start state and noise sequence).
+
+    Args:
+        env: Gymnasium environment
+        agent: Trained agent (if None, uses zero actions = free-running baseline)
+        num_months (int): Rollout length in months
+        seed (int or None): Reset seed. Fixes initial conditions AND noise.
+
+    Returns:
+        dict: {'total', 'el_nino', 'la_nina'} — fraction of months in a
+              multi-year event of each type.
+    """
+    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+
+    obs, _ = env.reset(seed=seed)
+    enso_history = [obs[0]]
+    for _ in range(num_months):
+        if agent is not None:
+            action, _ = agent.predict(obs, deterministic=True)
+        else:
+            action = np.zeros(env.action_space.shape)
+        obs, _, _, _, _ = env.step(action)
+        enso_history.append(obs[0])
+
+    classified = classify_enso_event(enso_history, threshold=env.threshold)
+    return mye_fraction_by_phase(classified)
+
+
+def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None,
                        debug_mode=False, seed=None):
     """
     Simulate a continuous trajectory with optional action disabling.

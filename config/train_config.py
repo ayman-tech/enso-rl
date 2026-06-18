@@ -10,11 +10,14 @@ class TrainConfig:
     
     # Training duration
     n_steps: int = 12 * 20 # steps before each update
-    train_epochs: int = 100
+    train_epochs: int = 1000
     train_months: int = n_steps*train_epochs  # episodes to train for
     
     # Learning rate
     learning_rate: float = 0.0003
+
+    # Random seed for PPO (reproducibility / multi-seed ensembles). None = unseeded.
+    seed: int = None
     
     # Simulation settings
     sim_months: int = 240  # simulation months for evaluation
