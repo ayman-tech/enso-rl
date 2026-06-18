@@ -22,7 +22,6 @@ import sys
 import time
 import argparse
 import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats as sp_stats
 
@@ -259,123 +258,6 @@ def compute_statistics(values_per_run, feature_names):
     return stats
 
 
-def plot_mi_bar(stats, mi_per_run, action_names, n_runs, output_dir, lag):
-    """Generate MI bar chart with significance annotations."""
-
-    sorted_idx = np.argsort([s['mean'] for s in stats])[::-1]
-
-    sorted_names = [stats[i]['feature'] for i in sorted_idx]
-    sorted_means = [stats[i]['mean'] * 1000 for i in sorted_idx]  # millinats
-    sorted_cis = [stats[i]['ci_95'] * 1000 for i in sorted_idx]
-    sorted_pvals = [stats[i]['p_value'] for i in sorted_idx]
-
-    colors = []
-    for s_idx in sorted_idx:
-        s = stats[s_idx]
-        if s['p_value'] >= 0.05:
-            colors.append('#BDBDBD')
-        else:
-            colors.append('#2196F3')
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-    bars = ax.bar(sorted_names, sorted_means, color=colors, edgecolor='black',
-                  linewidth=1.2, yerr=sorted_cis, capsize=6,
-                  error_kw={'linewidth': 1.5, 'capthick': 1.5})
-
-    for i, (mean_val, ci_val, p_val) in enumerate(zip(sorted_means, sorted_cis, sorted_pvals)):
-        star = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
-        y_pos = mean_val + ci_val + max(sorted_means) * 0.03
-        ax.text(i, y_pos, star, ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-    ax.set_xlabel('Action Dimension (target variable)', fontsize=13)
-    ax.set_ylabel(f'MI with ENSO Class (millinats) ± 95% CI (N={n_runs})', fontsize=13)
-    ax.set_title(f'Mutual Information: Action → ENSO Classification (lag={lag})', fontsize=15)
-    ax.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
-    ax.grid(axis='y', alpha=0.3)
-
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#2196F3', edgecolor='black', label='Significant (p<0.05)'),
-        Patch(facecolor='#BDBDBD', edgecolor='black', label='Not significant (p≥0.05)'),
-    ]
-    ax.legend(handles=legend_elements, fontsize=11)
-    fig.tight_layout()
-    fig.savefig(output_dir / 'mi_bar_chart.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / 'mi_bar_chart.png'}")
-
-    # Boxplot
-    fig2, ax2 = plt.subplots(figsize=(14, 7))
-    bp = ax2.boxplot(
-        [mi_per_run[:, i] * 1000 for i in sorted_idx],
-        labels=sorted_names, patch_artist=True, vert=True
-    )
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-
-    ax2.set_xlabel('Action Dimension', fontsize=13)
-    ax2.set_ylabel(f'MI (millinats) — N={n_runs} independent runs', fontsize=13)
-    ax2.set_title(f'Distribution of MI Across Runs (lag={lag})', fontsize=15)
-    ax2.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
-    ax2.grid(axis='y', alpha=0.3)
-    fig2.tight_layout()
-    fig2.savefig(output_dir / 'mi_distribution.png', dpi=150, bbox_inches='tight')
-    plt.close(fig2)
-    print(f"  Saved {output_dir / 'mi_distribution.png'}")
-
-
-def plot_lag_heatmap(mean_lag_profiles, lags, action_names, output_dir):
-    """Plot mean lag profile heatmap across runs."""
-    n_actions = len(action_names)
-
-    fig, ax = plt.subplots(figsize=(14, 8))
-    im = ax.imshow(mean_lag_profiles.T * 1000, aspect='auto', cmap='YlGnBu',
-                   interpolation='nearest')
-    ax.set_xticks(range(len(lags)))
-    ax.set_xticklabels([str(l) for l in lags])
-    ax.set_yticks(range(n_actions))
-    ax.set_yticklabels(action_names)
-    ax.set_xlabel('Lag (months)', fontsize=13)
-    ax.set_ylabel('Action Dimension', fontsize=13)
-    ax.set_title('MI(Action, ENSO Class) vs Lag (Mean over runs)', fontsize=15)
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('MI (millinats)', fontsize=12)
-
-    for i in range(len(lags)):
-        for j in range(n_actions):
-            val = mean_lag_profiles[i, j] * 1000
-            color = 'white' if val > mean_lag_profiles.max() * 1000 * 0.6 else 'black'
-            ax.text(i, j, f'{val:.1f}', ha='center', va='center', fontsize=8, color=color)
-
-    fig.tight_layout()
-    fig.savefig(output_dir / 'mi_lag_heatmap.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / 'mi_lag_heatmap.png'}")
-
-
-def plot_lag_profiles(mean_lag_profiles, lags, mi_primary, action_names, output_dir):
-    """Plot lag profile line chart for top action dimensions."""
-    top_k = min(5, len(action_names))
-    top_actions = np.argsort(mi_primary)[::-1][:top_k]
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-    cmap = plt.cm.tab10
-    for rank, idx in enumerate(top_actions):
-        ax.plot(lags, mean_lag_profiles[:, idx] * 1000,
-                marker='o', linewidth=2, label=action_names[idx],
-                color=cmap(rank))
-    ax.set_xlabel('Lag (months)', fontsize=13)
-    ax.set_ylabel('MI with ENSO Class (millinats)', fontsize=13)
-    ax.set_title(f'MI Lag Profile — Top {top_k} Actions (Mean over runs)', fontsize=15)
-    ax.legend(fontsize=11)
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / 'mi_lag_profile.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / 'mi_lag_profile.png'}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Mutual Information Analysis")
     parser.add_argument("--model", type=str, default="rl_model", help="Path to trained model")
@@ -489,13 +371,6 @@ def main():
         threshold=args.threshold,
     )
     print(f"\nResults saved to {output_dir / 'mi_results.npz'}")
-
-    # Generate plots
-    print("\nGenerating plots...")
-    mi_primary_mean = mi_primary_per_run.mean(axis=0)
-    plot_mi_bar(stats, mi_primary_per_run, action_names, args.n_runs, output_dir, primary_lag)
-    plot_lag_heatmap(mean_lag_profiles, args.lags, action_names, output_dir)
-    plot_lag_profiles(mean_lag_profiles, args.lags, mi_primary_mean, action_names, output_dir)
 
     elapsed = time.time() - start_time
     hours, remainder = divmod(int(elapsed), 3600)

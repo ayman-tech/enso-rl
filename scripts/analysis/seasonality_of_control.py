@@ -23,9 +23,6 @@ import sys
 import time
 import argparse
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from pathlib import Path
 
 repo_root = Path(__file__).parent.parent.parent
@@ -73,11 +70,8 @@ def collect_seasonal_forcing(model, env, num_months, spinup, seed):
 
 
 def _resolve_models(args, env_config):
-    """Return list of (label, model, env, var_names) for single or ensemble use."""
-    if args.model is not None:
-        names = [args.model]
-    else:
-        names = [f"{args.prefix}_seed{s}" for s in args.seeds]
+    """Return list of (label, model, env, var_names) for ensemble seeds."""
+    names = [f"{args.model}_seed{s}" for s in args.seeds]
     loaded = []
     for name in names:
         path = Path(f"models/{name}.zip")
@@ -108,69 +102,10 @@ def _print_table(total_by_month, var_names, peak_modes):
     print(f"  Most-forced modes: {', '.join(peak_modes)}")
 
 
-def _plot(abs_by_month, total_by_month, var_names, output_dir, label):
-    drivers = var_names[1:]
-    fig, (ax_h, ax_b) = plt.subplots(
-        1, 2, figsize=(16, 6), gridspec_kw={'width_ratios': [2.2, 1]})
-
-    # The modes live on very different native scales (e.g. WWV's |forcing| is ~6x
-    # any other mode in its own units), so a shared-scale heatmap of raw values
-    # makes every mode but WWV look like zero. Normalize each mode (row) to its OWN
-    # max so the *seasonal pattern* of every mode is visible; keep the absolute mean
-    # magnitude in the y-tick label so cross-mode scale is not lost.
-    abs_T = abs_by_month.T                                   # [n_modes, 12]
-    row_max = abs_T.max(axis=1, keepdims=True)
-    row_norm = np.divide(abs_T, row_max, out=np.zeros_like(abs_T), where=row_max > 0)
-    abs_mean = abs_T.mean(axis=1)                            # per-mode absolute mean
-
-    im = ax_h.imshow(row_norm, aspect='auto', cmap='viridis', origin='lower',
-                     vmin=0.0, vmax=1.0)
-    ax_h.set_xticks(range(12)); ax_h.set_xticklabels(MONTHS)
-    ax_h.set_yticks(range(len(drivers)))
-    ax_h.set_yticklabels([f'{d}  (μ={abs_mean[i]:.2f})' for i, d in enumerate(drivers)])
-    ax_h.set_title('Seasonal pattern of forcing\n(each mode normalized to its own max; '
-                   'μ = abs. mean in native units)')
-    for m in SPRING_BARRIER:  # outline the spring-barrier columns
-        ax_h.axvline(m - 0.5, color='red', lw=1.0, ls='--', alpha=0.7)
-        ax_h.axvline(m + 0.5, color='red', lw=1.0, ls='--', alpha=0.7)
-    fig.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04,
-                 label="|forcing| / mode's own max")
-
-    # Right panel: compare the seasonal *timing* of two intensity measures, each
-    # rescaled to [0,1] so the shapes are comparable:
-    #   (a) raw total (sum over modes) — dominated by WWV's large native units;
-    #   (b) mode-balanced — mean over modes of the per-mode-normalized forcing.
-    balanced = row_norm.mean(axis=0)                         # [12], mode-balanced
-    total_s = total_by_month / total_by_month.max() if total_by_month.max() > 0 else total_by_month
-    bal_s = balanced / balanced.max() if balanced.max() > 0 else balanced
-    w = 0.4
-    x = np.arange(12)
-    b1 = ax_b.bar(x - w / 2, total_s, w, label='raw total (WWV-dominated)',
-                  color='steelblue', edgecolor='black')
-    b2 = ax_b.bar(x + w / 2, bal_s, w, label='mode-balanced',
-                  color='#66BB6A', edgecolor='black')
-    for m in SPRING_BARRIER:  # mark spring barrier on both series
-        b1[m].set_color('#D32F2F'); b2[m].set_color('#AD1457')
-    ax_b.set_xticks(x); ax_b.set_xticklabels(MONTHS, rotation=45)
-    ax_b.set_ylabel('Seasonal intensity (each series ÷ its own max)')
-    ax_b.set_title('Seasonal timing of control\n(red/maroon = spring barrier)')
-    ax_b.legend(fontsize=8)
-    ax_b.grid(axis='y', alpha=0.3)
-
-    fig.suptitle(f'Seasonality of control — {label}', fontsize=14)
-    fig.tight_layout()
-    out = output_dir / 'seasonality_of_control.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"\n  Saved {out}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Seasonality of control (calendar month x mode)")
-    parser.add_argument("--model", type=str, default=None,
-                        help="Single model name (overrides --prefix/--seeds)")
-    parser.add_argument("--prefix", type=str, default="rl_model",
-                        help="Ensemble model prefix (models/{prefix}_seed{s}.zip)")
+    parser.add_argument("--model", type=str, default="ensemble",
+                        help="Ensemble model prefix (models/{model}_seed{s}.zip)")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
                         help="Ensemble seeds to pool over")
     parser.add_argument("--months", type=int, default=6000, help="Months per rollout")
@@ -181,8 +116,7 @@ def main():
 
     suppress_warnings()
     env_config = EnvConfig()
-    label = args.model if args.model is not None else args.prefix
-    output_dir = Path("plots") / label / "seasonality"
+    output_dir = Path("plots") / args.model / "seasonality"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
@@ -220,7 +154,6 @@ def main():
     peak_modes = [drivers[i] for i in np.argsort(mode_totals)[::-1][:3]]
 
     _print_table(total_by_month, var_names, peak_modes)
-    _plot(abs_by_month, total_by_month, var_names, output_dir, label)
 
     np.savez(
         output_dir / 'seasonality_of_control.npz',

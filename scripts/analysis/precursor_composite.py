@@ -29,9 +29,6 @@ import sys
 import time
 import argparse
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats as sp_stats
 
@@ -142,40 +139,6 @@ def _print_table(stats, var_names, lead):
             print(f"  {name:<10} {mean:>+12.4f} {ci:>10.4f} {sig:>5}")
 
 
-def _plot(stats, var_names, lead, output_dir):
-    """Precursor evolution: composite state of each driver mode over the lead window."""
-    phases = [p for p in PHASES if stats[p].get('n', 0) > 0]
-    if not phases:
-        print("  No events to plot.")
-        return
-    drivers = list(range(1, len(var_names)))  # skip Nino3.4 (index 0, the target)
-    x = np.arange(-lead, 0)
-    fig, axes = plt.subplots(1, len(phases), figsize=(7 * len(phases), 6), squeeze=False)
-    cmap = plt.get_cmap('tab10')
-    for k, phase in enumerate(phases):
-        ax = axes[0][k]
-        s = stats[phase]
-        for j, mi in enumerate(drivers):
-            ax.plot(x, s['traj_mean'][:, mi], color=cmap(j % 10),
-                    label=var_names[mi], lw=1.8)
-            ax.fill_between(x, s['traj_mean'][:, mi] - s['traj_ci'][:, mi],
-                            s['traj_mean'][:, mi] + s['traj_ci'][:, mi],
-                            color=cmap(j % 10), alpha=0.15)
-        ax.axhline(0, color='gray', ls='--', lw=0.8)
-        ax.set_xlabel('Months before MYE onset')
-        ax.set_ylabel('Composite mode anomaly')
-        ax.set_title(f"{PHASE_LABELS[phase]}  (N={s['n']})")
-        ax.grid(alpha=0.3)
-        if k == len(phases) - 1:
-            ax.legend(fontsize=8, ncol=2, loc='best')
-    fig.suptitle('Spontaneous-MYE precursor composite (agent-free XRO)', fontsize=14)
-    fig.tight_layout()
-    out = output_dir / 'precursor_composite.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"\n  Saved {out}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Spontaneous-MYE precursor composite (XRO, no agent)")
     parser.add_argument("--n-runs", type=int, default=50, help="Free-run rollouts to pool events over")
@@ -184,12 +147,12 @@ def main():
     parser.add_argument("--min-duration", type=int, default=12,
                         help="Multi-year criterion: run length > this (months). Matches classifier.")
     parser.add_argument("--master-seed", type=int, default=42)
-    parser.add_argument("--prefix", type=str, default="rl_model",
-                        help="Namespace label (match the ensemble prefix for figure grouping)")
+    parser.add_argument("--model", type=str, default="ensemble",
+                        help="Namespace label (match the ensemble prefix)")
     args = parser.parse_args()
 
     suppress_warnings()
-    output_dir = Path("plots") / args.prefix / "precursor_composite"
+    output_dir = Path("plots") / args.model / "precursor_composite"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
@@ -206,7 +169,6 @@ def main():
                                     args.master_seed)
     stats = composite_stats(windows, args.lead)
     _print_table(stats, var_names, args.lead)
-    _plot(stats, var_names, args.lead, output_dir)
 
     # Save flat arrays (per phase) for later overlay against driver rankings.
     save = {

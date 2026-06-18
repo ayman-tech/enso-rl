@@ -6,31 +6,17 @@ probability of multi-year ENSO over a free-running (zero-action) baseline, with
 confidence intervals, split into El Nino vs La Nina (the multi-year-La-Nina
 asymmetry).
 
-Two modes:
-  * single model  : CIs computed across independent paired rollouts of one agent
-                    (points 1.1 lift, 1.2 phase split).
-  * --ensemble    : CIs computed across independently trained seeds; each seed
-                    contributes its own mean lift (point 1.3). Also reports the
-                    cross-seed spread, which evidences strategy degeneracy.
-
-Each agent rollout is paired with a baseline rollout using the SAME seed, so the
-lift is a clean within-seed difference (identical start state + noise sequence).
+Runs in ensemble mode (CIs across independently trained seeds). Results are
+saved to lift_ensemble.npz and lift_ensemble.csv for notebook plotting.
 
 Usage:
-    # Single model (1.1 + 1.2)
-    uv run scripts/analysis/lift_analysis.py --model rl_model --n-rollouts 100 --months 1200
-
-    # Ensemble (1.1 + 1.2 + 1.3)
-    uv run scripts/analysis/lift_analysis.py --ensemble --prefix rl_model \
+    uv run scripts/analysis/lift_analysis.py --model ensemble \
         --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 1200
 """
 import sys
 import time
 import argparse
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import wandb
 from pathlib import Path
 from datetime import datetime
@@ -41,9 +27,9 @@ sys.path.insert(0, str(repo_root))
 
 from utils import suppress_warnings
 from utils.results_io import save_csv
-from utils.evaluation import rollout_mye_phased
+from utils.evaluation import rollout_mye_phased, rollout_mye_events
 from config import EnvConfig
-# NOTE: load_environment is imported lazily inside run_single/run_ensemble to
+# NOTE: load_environment is imported lazily inside run_ensemble to
 # avoid a circular import (scripts.evaluate imports run_lift_evaluation from here).
 
 PHASES = ['total', 'el_nino', 'la_nina']
@@ -66,23 +52,36 @@ def _ci95(samples):
 def paired_lift_for_model(model, env, n_rollouts, months, master_seed=42):
     """Run n_rollouts paired (agent, baseline) rollouts for one model.
 
-    Returns dict per phase: arrays of agent, baseline, and lift across rollouts.
+    Returns per phase: the time-fraction arrays (agent/baseline/lift) AND the
+    decomposition ingredients — per-rollout multi-year event COUNTS and pooled
+    per-event DURATIONS, for agent and baseline (so the lift can be split into
+    'more events' vs 'longer events').
     """
     rng = np.random.default_rng(master_seed)
     seeds = [int(rng.integers(0, 2**31)) for _ in range(n_rollouts)]
 
     agent = {p: np.zeros(n_rollouts) for p in PHASES}
     base = {p: np.zeros(n_rollouts) for p in PHASES}
+    agent_count = {p: np.zeros(n_rollouts) for p in PHASES}
+    base_count = {p: np.zeros(n_rollouts) for p in PHASES}
+    agent_dur = {p: [] for p in PHASES}
+    base_dur = {p: [] for p in PHASES}
 
     for i, seed in enumerate(seeds):
-        a = rollout_mye_phased(env, agent=model, num_months=months, seed=seed)
-        b = rollout_mye_phased(env, agent=None, num_months=months, seed=seed)
+        a = rollout_mye_events(env, agent=model, num_months=months, seed=seed)
+        b = rollout_mye_events(env, agent=None, num_months=months, seed=seed)
         for p in PHASES:
-            agent[p][i] = a[p]
-            base[p][i] = b[p]
+            agent[p][i] = a[p]['frac']
+            base[p][i] = b[p]['frac']
+            agent_count[p][i] = a[p]['count']
+            base_count[p][i] = b[p]['count']
+            agent_dur[p].extend(a[p]['durations'])
+            base_dur[p].extend(b[p]['durations'])
 
     lift = {p: agent[p] - base[p] for p in PHASES}
-    return {'agent': agent, 'baseline': base, 'lift': lift, 'seeds': seeds}
+    return {'agent': agent, 'baseline': base, 'lift': lift, 'seeds': seeds,
+            'agent_count': agent_count, 'base_count': base_count,
+            'agent_dur': agent_dur, 'base_dur': base_dur}
 
 
 def _print_table(title, rows):
@@ -98,34 +97,32 @@ def _print_table(title, rows):
               f"{lm:>+7.3f} ±{lci:<6.3f} | {p:>6.4f} {sig}")
 
 
-def _plot_lift(rows, out_path, title):
-    labels = [PHASE_LABELS[p] for p, *_ in rows]
-    lifts = [r[5] for r in rows]
-    cis = [r[6] for r in rows]
-    colors = ['#455A64', '#D32F2F', '#1976D2']  # total, el nino, la nina
-
-    fig, ax = plt.subplots(figsize=(9, 6))
-    x = np.arange(len(labels))
-    ax.bar(x, lifts, yerr=cis, capsize=6, color=colors[:len(labels)],
-           edgecolor='black', linewidth=1.2)
-    for i, (lm, lci) in enumerate(zip(lifts, cis)):
-        ax.text(i, lm + np.sign(lm or 1) * (lci + 0.005),
-                f"{lm:+.3f}", ha='center',
-                va='bottom' if lm >= 0 else 'top', fontsize=11, fontweight='bold')
-    ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.set_ylabel('MYE probability lift (agent - baseline)', fontsize=12)
-    ax.set_title(title, fontsize=14)
-    ax.grid(axis='y', alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"\n  Saved {out_path}")
+def _mean_ci_nan(vals):
+    """Mean and 95% t-CI over a list, ignoring NaNs (seeds with no events)."""
+    a = np.asarray([v for v in vals if not np.isnan(v)], dtype=float)
+    if a.size == 0:
+        return float('nan'), 0.0
+    if a.size < 2:
+        return float(a[0]), 0.0
+    return float(a.mean()), float(sp_stats.t.ppf(0.975, a.size - 1) * a.std(ddof=1) / np.sqrt(a.size))
 
 
-def _log_lift_wandb(rows, output_dir, img_name='lift_single.png'):
-    """Log lift rows + plot into the CURRENTLY ACTIVE wandb run.
+def _print_decomp_table(decomp_rows):
+    print(f"\n{'='*92}")
+    print("LIFT DECOMPOSITION — multi-year event FREQUENCY (per 100 yr) and mean DURATION (mo)")
+    print('='*92)
+    print(f"{'Phase':<22} | {'Freq agent':>12} {'Freq base':>12} | {'Dur agent':>12} {'Dur base':>12}")
+    print('-'*92)
+    for r in decomp_rows:
+        print(f"{PHASE_LABELS[r['phase']]:<22} | "
+              f"{r['freq_agent_per100yr']:>7.2f}±{r['freq_agent_ci95']:<4.2f} "
+              f"{r['freq_base_per100yr']:>7.2f}±{r['freq_base_ci95']:<4.2f} | "
+              f"{r['dur_agent_mo']:>7.2f}±{r['dur_agent_ci95']:<4.2f} "
+              f"{r['dur_base_mo']:>7.2f}±{r['dur_base_ci95']:<4.2f}")
+
+
+def _log_lift_wandb(rows):
+    """Log lift rows into the CURRENTLY ACTIVE wandb run.
 
     Does NOT call wandb.init/finish — so when invoked from evaluate.py the lift
     metrics land under evaluate.py's run. No-op if no run is active.
@@ -140,9 +137,6 @@ def _log_lift_wandb(rows, output_dir, img_name='lift_single.png'):
     for (p, am, aci, bm, bci, lm, lci, pv) in rows:
         log[f"lift/{p}"] = lm
         log[f"lift/{p}_ci"] = lci
-    img_path = output_dir / img_name
-    if img_path.exists():
-        log["lift_plot"] = wandb.Image(str(img_path))
     wandb.log(log)
 
 
@@ -169,7 +163,6 @@ def run_lift_evaluation(model, env, n_rollouts=100, months=1200, master_seed=42,
         rows.append((p, am, aci, bm, bci, lm, lci, pval))
 
     _print_table(f"MYE LIFT — '{label}' (N={n_rollouts} paired rollouts, {months} mo)", rows)
-    _plot_lift(rows, output_dir / 'lift_single.png', f"MYE Lift by Phase — {label}")
     save_kw = {'phases': np.array(PHASES), 'n_rollouts': n_rollouts, 'months': months}
     for p in PHASES:
         save_kw[f'agent_{p}'] = res['agent'][p]
@@ -178,18 +171,8 @@ def run_lift_evaluation(model, env, n_rollouts=100, months=1200, master_seed=42,
     np.savez(output_dir / 'lift_single.npz', **save_kw)
 
     if wandb_log:
-        _log_lift_wandb(rows, output_dir, 'lift_single.png')
+        _log_lift_wandb(rows)
     return rows
-
-
-def run_single(args, output_dir):
-    from scripts.evaluate import load_environment  # lazy: avoid circular import
-    env_config = EnvConfig()
-    model, env, _ = load_environment(args.model, env_config)
-    # Standalone mode owns its own wandb run, so log via main() (wandb_log=False here).
-    return run_lift_evaluation(model, env, n_rollouts=args.n_rollouts,
-                               months=args.months, master_seed=args.master_seed,
-                               output_dir=output_dir, label=args.model, wandb_log=False)
 
 
 def run_ensemble(args, output_dir):
@@ -199,10 +182,16 @@ def run_ensemble(args, output_dir):
     per_seed_lift = {p: [] for p in PHASES}
     per_seed_agent = {p: [] for p in PHASES}
     per_seed_base = {p: [] for p in PHASES}
+    # Lift decomposition: per-seed event FREQUENCY (per 100 yr) and mean DURATION (mo)
+    per_seed_freq_a = {p: [] for p in PHASES}
+    per_seed_freq_b = {p: [] for p in PHASES}
+    per_seed_dur_a = {p: [] for p in PHASES}
+    per_seed_dur_b = {p: [] for p in PHASES}
     used_seeds = []
+    cent = 1200.0 / args.months  # events-per-rollout -> events per 100 yr
 
     for seed in args.seeds:
-        name = f"{args.prefix}_seed{seed}"
+        name = f"{args.model}_seed{seed}"
         try:
             model, env, _ = load_environment(name, env_config)
         except FileNotFoundError:
@@ -213,6 +202,10 @@ def run_ensemble(args, output_dir):
             per_seed_lift[p].append(float(res['lift'][p].mean()))
             per_seed_agent[p].append(float(res['agent'][p].mean()))
             per_seed_base[p].append(float(res['baseline'][p].mean()))
+            per_seed_freq_a[p].append(float(np.mean(res['agent_count'][p])) * cent)
+            per_seed_freq_b[p].append(float(np.mean(res['base_count'][p])) * cent)
+            per_seed_dur_a[p].append(float(np.mean(res['agent_dur'][p])) if res['agent_dur'][p] else np.nan)
+            per_seed_dur_b[p].append(float(np.mean(res['base_dur'][p])) if res['base_dur'][p] else np.nan)
         used_seeds.append(seed)
         print(f"  seed={seed}: lift total={per_seed_lift['total'][-1]:+.3f} "
               f"| EN={per_seed_lift['el_nino'][-1]:+.3f} "
@@ -233,7 +226,7 @@ def run_ensemble(args, output_dir):
             _, pval = sp_stats.ttest_1samp(lift, 0.0)
         rows.append((p, am, aci, bm, bci, lm, lci, float(pval)))
 
-    _print_table(f"MYE LIFT — ensemble '{args.prefix}' "
+    _print_table(f"MYE LIFT — ensemble '{args.model}' "
                  f"(N={len(used_seeds)} seeds x {args.n_rollouts} rollouts)", rows)
 
     # Cross-seed spread (strategy degeneracy signal)
@@ -241,14 +234,18 @@ def run_ensemble(args, output_dir):
     for p in PHASES:
         print(f"    {PHASE_LABELS[p]:<22}: std = {np.std(per_seed_lift[p], ddof=1) if len(used_seeds)>1 else 0.0:.4f}")
 
-    _plot_lift(rows, output_dir / 'lift_ensemble.png',
-               f"MYE Lift by Phase — ensemble (N={len(used_seeds)} seeds)")
     save_kw = {'seeds': np.array(used_seeds), 'phases': np.array(PHASES),
                'n_rollouts': args.n_rollouts, 'months': args.months}
     for p in PHASES:
         save_kw[f'per_seed_lift_{p}'] = np.array(per_seed_lift[p])
         save_kw[f'per_seed_agent_{p}'] = np.array(per_seed_agent[p])
         save_kw[f'per_seed_base_{p}'] = np.array(per_seed_base[p])
+        save_kw[f'per_seed_freq_agent_{p}'] = np.array(per_seed_freq_a[p])
+        save_kw[f'per_seed_freq_base_{p}'] = np.array(per_seed_freq_b[p])
+        save_kw[f'per_seed_dur_agent_{p}'] = np.array(per_seed_dur_a[p])
+        save_kw[f'per_seed_dur_base_{p}'] = np.array(per_seed_dur_b[p])
+    for p, (_, _, _, _, _, _, _, pval) in zip(PHASES, rows):
+        save_kw[f'p_{p}'] = pval
     np.savez(output_dir / 'lift_ensemble.npz', **save_kw)
 
     # Tidy CSVs alongside the npz (survive lost logs; easy notebook loading).
@@ -263,27 +260,48 @@ def run_ensemble(args, output_dir):
                       'lift': float(per_seed_lift[p][i])}
                      for p in PHASES for i, s in enumerate(used_seeds)]
     save_csv(output_dir / 'lift_ensemble_per_seed.csv', per_seed_rows)
+
+    # ---- Lift decomposition: frequency vs duration (mechanism of the lift) ----
+    decomp_rows = []
+    for p in PHASES:
+        fa_m, fa_c = _mean_ci_nan(per_seed_freq_a[p])
+        fb_m, fb_c = _mean_ci_nan(per_seed_freq_b[p])
+        da_m, da_c = _mean_ci_nan(per_seed_dur_a[p])
+        db_m, db_c = _mean_ci_nan(per_seed_dur_b[p])
+        decomp_rows.append({'phase': p,
+                            'freq_agent_per100yr': fa_m, 'freq_agent_ci95': fa_c,
+                            'freq_base_per100yr': fb_m, 'freq_base_ci95': fb_c,
+                            'dur_agent_mo': da_m, 'dur_agent_ci95': da_c,
+                            'dur_base_mo': db_m, 'dur_base_ci95': db_c})
+    _print_decomp_table(decomp_rows)
+    save_csv(output_dir / 'lift_decomposition.csv', decomp_rows)
+    decomp_seed_rows = [{'phase': p, 'seed': int(s),
+                         'freq_agent_per100yr': per_seed_freq_a[p][i],
+                         'freq_base_per100yr': per_seed_freq_b[p][i],
+                         'dur_agent_mo': per_seed_dur_a[p][i],
+                         'dur_base_mo': per_seed_dur_b[p][i]}
+                        for p in PHASES for i, s in enumerate(used_seeds)]
+    save_csv(output_dir / 'lift_decomposition_per_seed.csv', decomp_seed_rows)
+    _plot_decomp_bars(decomp_rows, output_dir / 'lift_decomposition_bars.png')
+    _plot_decomp_shift(per_seed_freq_a, per_seed_dur_a, per_seed_freq_b,
+                       per_seed_dur_b, output_dir / 'lift_decomposition_shift.png')
     return rows
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Phase-resolved MYE lift analysis (1.1-1.3)")
-    parser.add_argument("--model", type=str, default="rl_model", help="Model name (single mode)")
-    parser.add_argument("--ensemble", action="store_true", help="Aggregate across seeds (1.3)")
-    parser.add_argument("--prefix", type=str, default="rl_model", help="Ensemble model prefix")
+    parser = argparse.ArgumentParser(description="Phase-resolved MYE lift analysis (ensemble)")
+    parser.add_argument("--model", type=str, default="ensemble", help="Ensemble model prefix")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
                         help="Ensemble seeds")
     parser.add_argument("--n-rollouts", type=int, default=100,
-                        help="Paired rollouts per model")
+                        help="Paired rollouts per seed")
     parser.add_argument("--months", type=int, default=1200, help="Months per rollout")
     parser.add_argument("--master-seed", type=int, default=42, help="Seed for rollout seeds")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     args = parser.parse_args()
 
     suppress_warnings()
-    # Namespace by model name (single) or ensemble prefix: plots/<name>/lift
-    name = args.prefix if args.ensemble else args.model
-    output_dir = Path("plots") / name / "lift"
+    output_dir = Path("plots") / args.model / "lift"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.no_wandb:
@@ -293,18 +311,16 @@ def main():
                    name=datetime.now().strftime(r"lift %H:%M %d-%m-%y"),
                    group="analysis", job_type="lift-analysis",
                    tags=["lift", "phase", "analysis"],
-                   config={"ensemble": args.ensemble, "n_rollouts": args.n_rollouts,
-                           "months": args.months})
+                   config={"n_rollouts": args.n_rollouts, "months": args.months})
 
     print("=" * 70)
     print("MULTI-YEAR ENSO LIFT ANALYSIS (phase-resolved)")
     print("=" * 70)
     start = time.time()
 
-    rows = run_ensemble(args, output_dir) if args.ensemble else run_single(args, output_dir)
+    rows = run_ensemble(args, output_dir)
 
-    img = 'lift_ensemble.png' if args.ensemble else 'lift_single.png'
-    _log_lift_wandb(rows, output_dir, img)
+    _log_lift_wandb(rows)
     if wandb.run is not None:
         wandb.finish()
 
