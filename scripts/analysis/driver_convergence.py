@@ -3,8 +3,8 @@ Driver convergence figure (paper point 1.5 payoff).
 
 Overlays the per-mode driver importance from THREE independent attributions and
 checks whether they agree:
-  1. Counterfactual zero-ablation ΔP(MYE)   (plots/counterfactual/ensemble/counterfactual_ensemble.npz)
-  2. Shapley value on mye_prob              (plots/shapley/ensemble/shapley_ensemble.npz)
+  1. Counterfactual zero-ablation ΔP(MYE)   (plots/<prefix>/counterfactual/counterfactual_ensemble.npz)
+  2. Shapley value on mye_prob              (plots/<prefix>/shapley/shapley_ensemble.npz)
   3. Agent-free interventional ΔP(MYE)      (plots/interventional_xro/interventional_xro.npz)
 
 Methods 1-2 are policy-grounded (ensemble of trained agents); method 3 is the
@@ -31,6 +31,8 @@ from scipy.stats import spearmanr
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
+from utils.results_io import save_csv  # noqa: E402
+
 PHASES = ['total', 'el_nino', 'la_nina']
 PHASE_LABELS = {'total': 'Total MYE', 'el_nino': 'Multi-year El Nino',
                 'la_nina': 'Multi-year La Nina'}
@@ -38,8 +40,8 @@ PHASE_LABELS = {'total': 'Total MYE', 'el_nino': 'Multi-year El Nino',
 def npz_paths(prefix):
     """Per-ensemble npz locations, namespaced under plots/<prefix>/."""
     base = Path("plots") / prefix
-    return (base / "counterfactual" / "ensemble" / "counterfactual_ensemble.npz",
-            base / "shapley" / "ensemble" / "shapley_ensemble.npz",
+    return (base / "counterfactual" / "counterfactual_ensemble.npz",
+            base / "shapley" / "shapley_ensemble.npz",
             base / "interventional_xro" / "interventional_xro.npz")
 
 
@@ -116,6 +118,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     phases = PHASES if args.phase == 'all' else [args.phase]
 
+    spearman_rows, importance_rows = [], []
     for phase in phases:
         cf = load_counterfactual(phase, cf_npz)
         sh = load_shapley(phase, sh_npz)
@@ -141,7 +144,11 @@ def main():
         x = np.arange(len(feats))
         width = 0.8 / len(avail)
         for k, (mname, mdict) in enumerate(avail.items()):
-            vals = _zscore([mdict[f] for f in feats])
+            raw = [mdict[f] for f in feats]
+            vals = _zscore(raw)
+            for f, rv, zv in zip(feats, raw, vals):
+                importance_rows.append({'phase': phase, 'method': mname, 'mode': f,
+                                        'raw': float(rv), 'zscore': float(zv)})
             ax.bar(x + k * width, vals, width, label=mname, edgecolor='black', linewidth=0.5)
         ax.axhline(0, color='gray', ls='--', lw=0.8)
         ax.set_xticks(x + width * (len(avail) - 1) / 2)
@@ -166,6 +173,13 @@ def main():
                 b = [avail[names[j]][f] for f in feats]
                 rho, pv = spearmanr(a, b)
                 print(f"    {names[i]:<26} vs {names[j]:<26}: rho={rho:+.3f} (p={pv:.3f})")
+                spearman_rows.append({'phase': phase, 'method_a': names[i],
+                                      'method_b': names[j], 'spearman_rho': float(rho),
+                                      'p': float(pv)})
+
+    # Tidy CSVs alongside the figures.
+    save_csv(out_dir / 'convergence_spearman.csv', spearman_rows)
+    save_csv(out_dir / 'convergence_importance.csv', importance_rows)
 
 
 if __name__ == "__main__":

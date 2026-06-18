@@ -39,6 +39,7 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from utils import suppress_warnings
+from utils.results_io import save_csv
 
 # Fixed variable names — avoids loading PyTorch in main process before fork
 ACTION_NAMES = ['WWV', 'NPMM', 'SPMM', 'IOB', 'IOD', 'SIOD', 'TNA', 'ATL3', 'SASD']
@@ -449,12 +450,26 @@ def run_ensemble(args, output_dir):
               if n_seeds > 1 else np.zeros_like(mean))
         save_kw[f'mean_{p}'] = mean
         save_kw[f'ci_{p}'] = ci
+        save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
         print(f"\n  === Shapley ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
         for fi in np.argsort(mean)[::-1]:
             print(f"    {feat[fi]:<10} {mean[fi]:+.5f} ± {ci[fi]:.5f}")
 
     np.savez(output_dir / 'shapley_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'shapley_ensemble.npz'}")
+
+    # Tidy CSVs alongside the npz (survive lost logs; easy notebook loading).
+    summary_rows, per_seed_rows = [], []
+    for p in phases:
+        for fi, feature in enumerate(feat):
+            summary_rows.append({'phase': p, 'feature': feature,
+                                 'mean_shapley': float(save_kw[f'mean_{p}'][fi]),
+                                 'ci95': float(save_kw[f'ci_{p}'][fi])})
+            for si, s in enumerate(used):
+                per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feature,
+                                      'shapley': float(save_kw[f'per_seed_{p}'][si, fi])})
+    save_csv(output_dir / 'shapley_ensemble.csv', summary_rows)
+    save_csv(output_dir / 'shapley_ensemble_per_seed.csv', per_seed_rows)
 
 
 def main():
@@ -484,7 +499,7 @@ def main():
     if args.ensemble:
         suppress_warnings()
         np.random.seed(args.master_seed)
-        out = Path("plots") / args.prefix / "shapley" / "ensemble"
+        out = Path("plots") / args.prefix / "shapley"
         out.mkdir(parents=True, exist_ok=True)
         print("=" * 70, flush=True)
         print("SHAPLEY — ENSEMBLE (cross-seed, phase-resolved)", flush=True)

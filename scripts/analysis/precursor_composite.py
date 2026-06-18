@@ -44,6 +44,7 @@ sys.path.insert(0, str(repo_root))
 from interventional_xro import build_env, rollout  # noqa: E402
 from utils.enso_classifier import _find_continuous_runs  # noqa: E402
 from utils import suppress_warnings  # noqa: E402
+from utils.results_io import save_csv  # noqa: E402
 
 PHASES = ['total', 'el_nino', 'la_nina']
 PHASE_LABELS = {'total': 'All MYE', 'el_nino': 'Multi-year El Nino',
@@ -224,6 +225,17 @@ def main():
             save[f'{phase}_pattern_ci'] = s['pattern_ci']
     np.savez(output_dir / 'precursor_composite.npz', **save)
     print(f"  Saved {output_dir / 'precursor_composite.npz'}")
+
+    # Tidy CSV alongside the npz: per-phase, per-mode precursor pattern.
+    csv_rows = []
+    for phase in PHASES:
+        s = stats[phase]
+        if s.get('n', 0) > 0:
+            for i, v in enumerate(var_names):
+                csv_rows.append({'phase': phase, 'mode': v, 'n_events': int(s['n']),
+                                 'precursor_mean': float(s['pattern_mean'][i]),
+                                 'ci95': float(s['pattern_ci'][i])})
+    save_csv(output_dir / 'precursor_composite.csv', csv_rows)
 
     el = time.time() - start
     print(f"\n{'='*70}\nPRECURSOR COMPOSITE COMPLETE — {int(el//60)}m {int(el%60)}s\n{'='*70}")

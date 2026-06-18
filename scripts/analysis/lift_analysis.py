@@ -40,6 +40,7 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from utils import suppress_warnings
+from utils.results_io import save_csv
 from utils.evaluation import rollout_mye_phased
 from config import EnvConfig
 # NOTE: load_environment is imported lazily inside run_single/run_ensemble to
@@ -249,6 +250,19 @@ def run_ensemble(args, output_dir):
         save_kw[f'per_seed_agent_{p}'] = np.array(per_seed_agent[p])
         save_kw[f'per_seed_base_{p}'] = np.array(per_seed_base[p])
     np.savez(output_dir / 'lift_ensemble.npz', **save_kw)
+
+    # Tidy CSVs alongside the npz (survive lost logs; easy notebook loading).
+    summary_rows = [{'phase': p, 'agent': am, 'agent_ci95': aci,
+                     'baseline': bm, 'baseline_ci95': bci,
+                     'lift': lm, 'lift_ci95': lci, 'p': pval}
+                    for (p, am, aci, bm, bci, lm, lci, pval) in rows]
+    save_csv(output_dir / 'lift_ensemble.csv', summary_rows)
+    per_seed_rows = [{'phase': p, 'seed': int(s),
+                      'agent': float(per_seed_agent[p][i]),
+                      'baseline': float(per_seed_base[p][i]),
+                      'lift': float(per_seed_lift[p][i])}
+                     for p in PHASES for i, s in enumerate(used_seeds)]
+    save_csv(output_dir / 'lift_ensemble_per_seed.csv', per_seed_rows)
     return rows
 
 

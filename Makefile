@@ -7,7 +7,6 @@ train:
 	uv run scripts/evaluate.py --model $(name) --trajectory
 ensemble:
 	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 100 --no-wandb
-	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --no-wandb
 	
 evaluate:
 	uv run scripts/evaluate.py --model $(name) --all
@@ -59,7 +58,8 @@ results-quick:
 	$(MAKE) shapley name=$(name)
 	$(MAKE) interventional name=$(name)
 	$(MAKE) convergence name=$(name)
-	$(MAKE) precursor name=$(name)
+	uv run scripts/analysis/seed_sensitivity.py --prefix ensemble
+# 	$(MAKE) precursor name=$(name)
 	$(MAKE) seasonality name=$(name)
 
 results-robust:
@@ -68,9 +68,19 @@ results-robust:
 	$(MAKE) shapley-robust name=$(name)
 	$(MAKE) interventional-robust name=$(name)
 	$(MAKE) convergence name=$(name)
-	$(MAKE) precursor-robust name=$(name)
+	uv run scripts/analysis/seed_sensitivity.py --prefix ensemble
+# 	$(MAKE) precursor-robust name=$(name)
 	$(MAKE) seasonality-robust name=$(name)
 
+
+full-quick:
+	$(MAKE) ensemble name=$(name)
+	$(MAKE) results-quick name=$(name)
+
+
+# ============================== ARCHIVED ================================
+# Policy-facing XAI (MI / gradient / IG): single-model scripts, run on a representative
+# seed. These are SUPPORTING evidence (what the policy attends to), not causal.
 traj-ensemble:
 	uv run scripts/evaluate.py --model $(name)_seed0 --trajectory --no-wandb
 	uv run scripts/evaluate.py --model $(name)_seed1 --trajectory --no-wandb
@@ -82,10 +92,6 @@ traj-ensemble:
 	uv run scripts/evaluate.py --model $(name)_seed7 --trajectory --no-wandb
 	uv run scripts/evaluate.py --model $(name)_seed8 --trajectory --no-wandb
 	uv run scripts/evaluate.py --model $(name)_seed9 --trajectory --no-wandb
-
-# ============================== ARCHIVED ================================
-# Policy-facing XAI (MI / gradient / IG): single-model scripts, run on a representative
-# seed. These are SUPPORTING evidence (what the policy attends to), not causal.
 policy-facing:
 	uv run scripts/analysis/mutual_information.py   --model $(name)_seed0 --months 1200
 	uv run scripts/analysis/gradient_sensitivity.py --model $(name)_seed0 --months 600 --n-runs 6

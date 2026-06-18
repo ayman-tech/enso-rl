@@ -38,6 +38,7 @@ from utils.data_processing import load_observational_data, prepare_xro_parameter
 from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
+from utils.results_io import save_csv
 from XRO.core import XRO
 
 METRIC_LABELS = {
@@ -493,6 +494,7 @@ def run_ensemble(args, output_dir):
               if n_seeds > 1 else np.zeros_like(mean))
         save_kw[f'mean_{p}'] = mean
         save_kw[f'ci_{p}'] = ci
+        save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
         print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
         order = np.argsort(mean)
         for fi in order:
@@ -500,6 +502,19 @@ def run_ensemble(args, output_dir):
 
     np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
+
+    # Tidy CSVs alongside the npz (survive lost logs; easy notebook loading).
+    summary_rows, per_seed_rows = [], []
+    for p in phases:
+        for fi, feat in enumerate(controllable):
+            summary_rows.append({'phase': p, 'feature': feat,
+                                 'mean_dP_MYE': float(save_kw[f'mean_{p}'][fi]),
+                                 'ci95': float(save_kw[f'ci_{p}'][fi])})
+            for si, s in enumerate(used):
+                per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feat,
+                                      'dP_MYE': float(save_kw[f'per_seed_{p}'][si, fi])})
+    save_csv(output_dir / 'counterfactual_ensemble.csv', summary_rows)
+    save_csv(output_dir / 'counterfactual_ensemble_per_seed.csv', per_seed_rows)
 
 
 def main():
@@ -528,7 +543,7 @@ def main():
 
     if args.ensemble:
         suppress_warnings()
-        out = Path("plots") / args.prefix / "counterfactual" / "ensemble"
+        out = Path("plots") / args.prefix / "counterfactual"
         out.mkdir(parents=True, exist_ok=True)
         print("=" * 70)
         print("COUNTERFACTUAL — ENSEMBLE (cross-seed, phase-resolved)")

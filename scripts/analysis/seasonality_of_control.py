@@ -36,6 +36,7 @@ sys.path.insert(0, str(repo_root))
 from counterfactual_analysis import load_environment  # noqa: E402
 from utils.evaluation import simulate_trajectory  # noqa: E402
 from utils import suppress_warnings  # noqa: E402
+from utils.results_io import save_csv  # noqa: E402
 from config import EnvConfig  # noqa: E402
 
 MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -234,6 +235,18 @@ def main():
         months_per_rollout=args.months, spinup=args.spinup,
     )
     print(f"  Saved {output_dir / 'seasonality_of_control.npz'}")
+
+    # Tidy CSVs alongside the npz: long month x mode forcing + monthly totals.
+    drivers = var_names[1:]
+    long_rows = [{'month': MONTHS[m], 'month_idx': m, 'mode': drivers[j],
+                  'mean_abs_forcing': float(abs_by_month[m, j]),
+                  'mean_signed_forcing': float(signed_by_month[m, j])}
+                 for m in range(12) for j in range(len(drivers))]
+    save_csv(output_dir / 'seasonality_of_control.csv', long_rows)
+    total_rows = [{'month': MONTHS[m], 'month_idx': m,
+                   'total_abs_forcing': float(total_by_month[m]),
+                   'spring_barrier': bool(m in SPRING_BARRIER)} for m in range(12)]
+    save_csv(output_dir / 'seasonality_of_control_monthly_total.csv', total_rows)
 
     el = time.time() - start
     print(f"\n{'='*70}\nSEASONALITY OF CONTROL COMPLETE — {int(el//60)}m {int(el%60)}s\n{'='*70}")

@@ -42,6 +42,7 @@ sys.path.insert(0, str(repo_root))
 
 from config import EnvConfig
 from utils import suppress_warnings
+from utils.results_io import save_csv
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
@@ -324,6 +325,11 @@ def main():
         n_runs=args.n_runs, months=args.months, seeds=np.array(seeds),
     )
     print(f"  Saved {output_dir / 'interventional_xro.npz'}")
+
+    # Tidy CSV alongside the npz (rows are already per target/sign/phase).
+    csv_rows = [{'target': r['target'], 'sign': r['sign'], 'phase': r['phase'],
+                 'mean_dP_MYE': r['mean'], 'ci95': r['ci'], 'p': r['p']} for r in rows]
+    save_csv(output_dir / 'interventional_xro.csv', csv_rows)
 
     el = time.time() - start
     print(f"\n{'='*70}\nINTERVENTIONAL ANALYSIS COMPLETE — {int(el//60)}m {int(el%60)}s\n{'='*70}")
