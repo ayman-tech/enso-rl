@@ -1,21 +1,17 @@
-.PHONY: train evaluate shapley counterfactual igi ensemble shapley-single counterfactual-single shapley-robust counterfactual-robust interventional interventional-robust convergence lift lift-robust precursor precursor-robust seasonality seasonality-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
+.PHONY: train evaluate shapley counterfactual ensemble shapley-single counterfactual-single shapley-robust counterfactual-robust interventional interventional-robust inference inference-robust precursor precursor-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
 
 name ?= model
 
 train:
 	uv run scripts/train.py --epochs 2000 --name $(name)
-	uv run scripts/evaluate.py --model $(name) --trajectory
 ensemble:
 	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 100 --no-wandb
-	
-evaluate:
-	uv run scripts/evaluate.py --model $(name) --all
 
-# --- Lift (headline P(MYE) gain), agent-free validation, mechanism, policy-facing ---
-lift:
-	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 600 --no-wandb
-lift-robust:
-	uv run scripts/analysis/lift_analysis.py --ensemble --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200 --no-wandb
+# --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
+inference:
+	uv run scripts/analysis/inference.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 1200
+inference-robust:
+	uv run scripts/analysis/inference.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200
 
 # =============== X-AI methods ================
 shapley:
@@ -35,8 +31,6 @@ interventional:
 interventional-robust:
 	uv run scripts/analysis/interventional_xro.py --prefix $(name) --n-runs 50 --months 1200 --mode press --direction both
 
-convergence:
-	uv run scripts/analysis/driver_convergence.py --prefix $(name)
 
 # ================== Other Analysis ===================
 # precursor_composite is agent-free (no model); validates drivers vs spontaneous MYE (2.1).
@@ -45,32 +39,17 @@ precursor:
 precursor-robust:
 	uv run scripts/analysis/precursor_composite.py --prefix $(name) --n-runs 100 --months 2400 --lead 24
 
-# seasonality_of_control bins the agent's scaled forcing by calendar month x mode (2.8).
-seasonality:
-	uv run scripts/analysis/seasonality_of_control.py --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --months 1200
-seasonality-robust:
-	uv run scripts/analysis/seasonality_of_control.py --prefix $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --months 6000
-
 # Aggregate result pipelines (run on an already-trained ensemble: name=<prefix>)
 results-quick:
-	$(MAKE) lift name=$(name)
+	$(MAKE) inference name=$(name)
 	$(MAKE) counterfactual name=$(name)
 	$(MAKE) shapley name=$(name)
 	$(MAKE) interventional name=$(name)
-	$(MAKE) convergence name=$(name)
-	uv run scripts/analysis/seed_sensitivity.py --prefix ensemble
-# 	$(MAKE) precursor name=$(name)
-	$(MAKE) seasonality name=$(name)
-
 results-robust:
-	$(MAKE) lift-robust name=$(name)
+	$(MAKE) inference-robust name=$(name)
 	$(MAKE) counterfactual-robust name=$(name)
 	$(MAKE) shapley-robust name=$(name)
 	$(MAKE) interventional-robust name=$(name)
-	$(MAKE) convergence name=$(name)
-	uv run scripts/analysis/seed_sensitivity.py --prefix ensemble
-# 	$(MAKE) precursor-robust name=$(name)
-	$(MAKE) seasonality-robust name=$(name)
 
 
 full-quick:
