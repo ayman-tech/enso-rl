@@ -43,12 +43,17 @@ Alignment note:
 
 Usage:
     uv run scripts/analysis/inference.py --model ensemble
-    uv run scripts/analysis/inference.py --model ensemble --seeds 0 1 2 --n-rollouts 5 --months 120
+    uv run scripts/analysis/inference.py --model ensemble --n-rollouts 5 --months 120
+
+Seeds are auto-detected from all existing models/{model}_seed*.zip files.
 """
+import re
 import sys
 import time
 import argparse
 import numpy as np
+import multiprocessing as mp
+from multiprocessing import cpu_count
 from pathlib import Path
 
 repo_root = Path(__file__).parent.parent.parent
@@ -76,6 +81,29 @@ def _encode_classified(classified_array):
     return np.array([_LABEL_MAP.get(s, 0) for s in classified_array[1:]], dtype=np.int8)
 
 
+def _seed_sort_key(s):
+    """Sort ints numerically first, then any string suffixes lexicographically."""
+    return (0, s, "") if isinstance(s, int) else (1, 0, str(s))
+
+
+def discover_seeds(model):
+    """Find ensemble seeds from existing models/{model}_seed*.zip filenames.
+
+    The suffix after `_seed` is returned as an int when it is a plain integer
+    (the ensemble case, e.g. ensemble_seed3.zip), otherwise as the raw string
+    (e.g. a sweep model's 0-0-0-0-3). Returns a sorted list.
+    """
+    seeds = []
+    pat = re.compile(rf"{re.escape(model)}_seed(.+)")
+    for p in sorted(Path("models").glob(f"{model}_seed*.zip")):
+        m = pat.fullmatch(p.stem)
+        if not m:
+            continue
+        tok = m.group(1)
+        seeds.append(int(tok) if tok.lstrip("-").isdigit() else tok)
+    return sorted(seeds, key=_seed_sort_key)
+
+
 def _print_summary(seeds_used, agent_mye_label, base_mye_label):
     print(f"\n{'='*55}")
     print(f"{'Seed':>6} | {'Agent MYE%':>10} | {'Base MYE%':>10} | {'Lift':>8}")
@@ -90,20 +118,63 @@ def _print_summary(seeds_used, agent_mye_label, base_mye_label):
     print(f"{'='*55}")
 
 
+def _worker_seed(wargs):
+    """Run all paired rollouts for one trained seed.
+
+    Spawn-safe: heavy imports and model loading happen here, not in the parent.
+    The rollout seeds are precomputed by the parent and passed in, so results are
+    bit-identical to the serial version and independent of completion order.
+    Returns the per-seed arrays for the parent to assemble in seed order.
+    """
+    si, seed, model_name, r_seeds, T, env_config = wargs
+    suppress_warnings()
+    model, env, vnames = load_environment(model_name, env_config)
+
+    n_r = len(r_seeds)
+    a_obs = np.zeros((n_r, T, 10), dtype=np.float32)
+    a_act = np.zeros((n_r, T,  9), dtype=np.float32)
+    a_mye = np.zeros((n_r, T),     dtype=np.int8)
+    b_obs = np.zeros((n_r, T, 10), dtype=np.float32)
+    b_mye = np.zeros((n_r, T),     dtype=np.int8)
+
+    for ri, rs in enumerate(r_seeds):
+        sim_a = simulate_trajectory(env, agent=model, num_months=T, seed=rs)
+        sim_b = simulate_trajectory(env, agent=None,  num_months=T, seed=rs)
+        a_obs[ri] = sim_a['states_traj'][1:].astype(np.float32)
+        a_act[ri] = sim_a['actions_traj'].astype(np.float32)
+        a_mye[ri] = _encode_classified(sim_a['classified_event_array'])
+        b_obs[ri] = sim_b['states_traj'][1:].astype(np.float32)
+        b_mye[ri] = _encode_classified(sim_b['classified_event_array'])
+
+    af = (a_mye >= 3).mean() * 100
+    bf = (b_mye >= 3).mean() * 100
+    print(f"  [seed {seed}] done — agent={af:.1f}%  base={bf:.1f}%  lift={af-bf:+.1f}%", flush=True)
+    return si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified inference: paired rollouts → raw npz")
     parser.add_argument("--model",       type=str, default="ensemble",
-                        help="Ensemble prefix — loads models/{model}_seed{s}.zip")
-    parser.add_argument("--seeds",       type=int, nargs="+", default=list(range(10)))
+                        help="Ensemble prefix — auto-loads all models/{model}_seed*.zip")
     parser.add_argument("--n-rollouts",  type=int, default=30,
                         help="Paired rollouts per seed")
     parser.add_argument("--months",      type=int, default=1200,
                         help="Simulation months per rollout (T)")
     parser.add_argument("--master-seed", type=int, default=42)
+    parser.add_argument("--workers",     type=int, default=None,
+                        help="Parallel seeds at once (default: cpu_count - 2; use 1 "
+                             "for serial). Mirrors shapley/counterfactual_analysis; "
+                             "results are identical to serial.")
     args = parser.parse_args()
 
     suppress_warnings()
     start_time = time.time()
+
+    # Auto-detect all trained seeds from the model files.
+    valid_seeds = discover_seeds(args.model)
+    if not valid_seeds:
+        raise FileNotFoundError(
+            f"No models/{args.model}_seed*.zip found — check --model.")
 
     output_dir = Path("plots") / args.model
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -116,28 +187,15 @@ def main():
     print("INFERENCE — paired rollouts → raw per-step data")
     print("=" * 60)
     print(f"  model      = {args.model}")
-    print(f"  seeds      = {args.seeds}")
+    print(f"  seeds      = {valid_seeds}")
     print(f"  n_rollouts = {args.n_rollouts}")
     print(f"  months     = {args.months}")
     print(f"  output     = {out_path}")
     print()
 
-    # Discover how many seeds actually have models
-    valid_seeds = []
-    for s in args.seeds:
-        p = Path(f"models/{args.model}_seed{s}.zip")
-        if p.exists():
-            valid_seeds.append(s)
-        else:
-            print(f"  [skip] models/{args.model}_seed{s}.zip not found")
-
-    if not valid_seeds:
-        raise FileNotFoundError("No model files found. Check --model and --seeds.")
-
     n_seeds = len(valid_seeds)
     T = args.months
     n_r = args.n_rollouts
-    var_names = None
 
     # Pre-allocate
     agent_obs       = np.zeros((n_seeds, n_r, T, 10), dtype=np.float32)
@@ -147,31 +205,37 @@ def main():
     base_mye_label  = np.zeros((n_seeds, n_r, T),     dtype=np.int8)
     rollout_seeds   = np.zeros((n_seeds, n_r),         dtype=np.int64)
 
+    # Precompute each seed's rollout seeds in the parent (master_rng advances once
+    # per seed, in seed order) so the work is reproducible and order-independent —
+    # this makes the per-seed rollouts safe to run in parallel processes.
+    worker_args = []
     for si, seed in enumerate(valid_seeds):
-        name = f"{args.model}_seed{seed}"
-        print(f"\n── Seed {seed}  ({name}) ──")
-        model, env, vnames = load_environment(name, env_config)
-        if var_names is None:
-            var_names = vnames
-
         seed_rng = np.random.default_rng(master_rng.integers(0, 2**31))
         r_seeds = [int(seed_rng.integers(0, 2**31)) for _ in range(n_r)]
+        rollout_seeds[si] = r_seeds
+        worker_args.append((si, seed, f"{args.model}_seed{seed}", r_seeds, T, env_config))
 
-        for ri, rs in enumerate(r_seeds):
-            sim_a = simulate_trajectory(env, agent=model, num_months=T, seed=rs)
-            sim_b = simulate_trajectory(env, agent=None,  num_months=T, seed=rs)
+    n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
+    n_workers = min(n_workers, n_seeds)  # no more workers than seeds
 
-            agent_obs[si, ri]       = sim_a['states_traj'][1:].astype(np.float32)
-            agent_actions[si, ri]   = sim_a['actions_traj'].astype(np.float32)
-            agent_mye_label[si, ri] = _encode_classified(sim_a['classified_event_array'])
-            base_obs[si, ri]        = sim_b['states_traj'][1:].astype(np.float32)
-            base_mye_label[si, ri]  = _encode_classified(sim_b['classified_event_array'])
-            rollout_seeds[si, ri]   = rs
+    if n_workers > 1:
+        print(f"  Parallel across {n_seeds} seeds with {n_workers} workers\n", flush=True)
+        with mp.Pool(processes=n_workers) as pool:
+            results = pool.map(_worker_seed, worker_args)
+    else:
+        print("  Serial (workers=1)\n", flush=True)
+        results = [_worker_seed(wa) for wa in worker_args]
 
-            if (ri + 1) % 5 == 0 or ri == n_r - 1:
-                a_mye = (agent_mye_label[si, :ri + 1] >= 3).mean() * 100
-                b_mye = (base_mye_label[si, :ri + 1] >= 3).mean() * 100
-                print(f"  rollout {ri+1:>3}/{n_r}  agent={a_mye:.1f}%  base={b_mye:.1f}%")
+    # Assemble per-seed results into the pre-allocated arrays (by seed index).
+    var_names = None
+    for si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye in results:
+        if var_names is None:
+            var_names = vnames
+        agent_obs[si]       = a_obs
+        agent_actions[si]   = a_act
+        agent_mye_label[si] = a_mye
+        base_obs[si]        = b_obs
+        base_mye_label[si]  = b_mye
 
     _print_summary(valid_seeds, agent_mye_label, base_mye_label)
 
