@@ -58,7 +58,7 @@ class EnvConfig:
     ])
 
     # Observation space dimension
-    obs_dim: int = 13  # 10 variables + month + ENSO-event duration + phase sign
+    obs_dim: int = 12  # 10 variables + month + ENSO-event duration
 
     # Action space dimension
     action_dim: int = 9

@@ -62,11 +62,13 @@ class XROMultiYearEnv(gym.Env):
         )
         
         # Observation space: State (10D) + month (1D) + ENSO-event duration (1D)
-        # + ENSO-event phase sign (1D) = n_modes + 3.
+        # = n_modes + 2. (Phase sign is omitted: it is just thresholded Nino3.4,
+        # already in state[0], so it adds no information without gap-tolerant
+        # event tracking. Re-add it alongside any grace/gap logic.)
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.n_modes + 3,),
+            shape=(self.n_modes + 2,),
             dtype=np.float32
         )
         
@@ -149,12 +151,11 @@ class XROMultiYearEnv(gym.Env):
 
     def _get_obs(self):
         """Get observation: state + seasonal-month feature + current ENSO-event
-        duration and phase sign."""
+        duration."""
         month_feature = ((self.current_step + self.month_offset) % 12) / 12.0
         duration_feature = self.consecutive_enso_months / self._duration_norm
-        phase_feature = float(self.enso_phase_sign)
         return np.concatenate(
-            [self.state, [month_feature, duration_feature, phase_feature]],
+            [self.state, [month_feature, duration_feature]],
             dtype=np.float32,
         )
 
