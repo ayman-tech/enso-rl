@@ -78,8 +78,8 @@ class EnvConfig:
         # Ceilings = the observed ORAS5 maxima (El Nino 18mo, La Nina 25mo),
         # rounded up slightly so the real triple-dip La Nina (25mo) is still
         # fully rewarded but anything *longer than ever observed* is penalized.
-        "duration_ceiling_el_nino": 20,
-        "duration_ceiling_la_nina": 27,
+        "duration_ceiling_el_nino": 24,
+        "duration_ceiling_la_nina": 24,
         "duration_penalty_rate": 0.7,  # per month beyond the phase ceiling (sharp brake)
         # State-plausibility (Mahalanobis) penalty: catches *extreme/implausible
         # states* (e.g. Nino3.4 at -3 sigma, impossible mode combinations),
