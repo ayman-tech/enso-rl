@@ -61,11 +61,12 @@ class XROMultiYearEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Observation space: State (10D) + Month feature (1D) = 11D
+        # Observation space: State (10D) + month (1D) + ENSO-event duration (1D)
+        # + ENSO-event phase sign (1D) = n_modes + 3.
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.n_modes + 1,),
+            shape=(self.n_modes + 3,),
             dtype=np.float32
         )
         
@@ -81,8 +82,10 @@ class XROMultiYearEnv(gym.Env):
         realism_quantile = reward_config.get('realism_quantile', 0.95)
         # Phase-specific duration ceilings + ramp (discourage unrealistic persistence)
         self.duration_ceiling_el_nino = reward_config.get('duration_ceiling_el_nino', 24)
-        self.duration_ceiling_la_nina = reward_config.get('duration_ceiling_la_nina', 36)
+        self.duration_ceiling_la_nina = reward_config.get('duration_ceiling_la_nina', 24)
         self.duration_penalty_rate = reward_config.get('duration_penalty_rate', 0.3)
+        # Scale for the duration feature in the observation (months); ~1.0 at 2 years.
+        self._duration_norm = 24.0
 
         # State-plausibility (Mahalanobis) reference from observed climatology.
         # Catches extreme/implausible single states; the duration ramp above
@@ -145,9 +148,15 @@ class XROMultiYearEnv(gym.Env):
         return self._get_obs(), {}
 
     def _get_obs(self):
-        """Get observation (state + month feature)."""
+        """Get observation: state + seasonal-month feature + current ENSO-event
+        duration and phase sign."""
         month_feature = ((self.current_step + self.month_offset) % 12) / 12.0
-        return np.concatenate([self.state, [month_feature]], dtype=np.float32)
+        duration_feature = self.consecutive_enso_months / self._duration_norm
+        phase_feature = float(self.enso_phase_sign)
+        return np.concatenate(
+            [self.state, [month_feature, duration_feature, phase_feature]],
+            dtype=np.float32,
+        )
 
     def step(self, action):
         """

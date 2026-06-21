@@ -5,13 +5,13 @@ name ?= model
 train:
 	uv run scripts/train.py --epochs 2000 --name $(name)
 ensemble:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 100 --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 1000 --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
-	uv run scripts/analysis/inference.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 30 --months 1200
+	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200
 inference-robust:
-	uv run scripts/analysis/inference.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-rollouts 100 --months 1200
+	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 100 --months 1200
 
 # =============== X-AI methods ================
 shapley:
