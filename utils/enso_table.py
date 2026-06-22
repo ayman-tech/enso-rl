@@ -9,31 +9,44 @@ import matplotlib.patches as mpatches
 import wandb
 
 
-def create_enso_table(enso_traj, threshold=0.5):
+def create_enso_table(enso_traj, threshold=0.5, start_month=0):
     """
-    Create a formatted ENSO table (years x 3-month seasons).
-    
+    Create a formatted ENSO table (years x 3-month seasons), aligned to the
+    calendar so column j is always the season centered on calendar month j
+    (DJF=Jan, JFM=Feb, ..., NDJ=Dec).
+
     Args:
         enso_traj (array): ENSO time series (already smooth / ONI)
         threshold (float): Threshold for coloring
-        
+        start_month (int): 0-based calendar month of the first value (0=Jan).
+            With the env's month_offset, a rollout can start in any month, so we
+            pad the front with `start_month` blanks (and the tail to fill the last
+            row) so values land in their true calendar column. Blanks are NaN.
+
     Returns:
-        pd.DataFrame: Styled dataframe with ENSO values
+        pd.DataFrame: dataframe with ENSO values, NaN for out-of-range padding.
     """
-    enso_data = np.asarray(enso_traj)
-    
-    # Reshape into years x seasons
+    enso_data = np.asarray(enso_traj, dtype=float)
     n_months = 12
-    n_years = len(enso_data) // n_months
-    data_full_years = enso_data[:n_years * n_months]
-    reshaped_data = data_full_years.reshape(n_years, n_months)
-    
+
+    start_month = int(start_month) % n_months
+    # Pad front so data[0] lands in column `start_month`, and tail to a full row.
+    pad_front = start_month
+    total = pad_front + len(enso_data)
+    pad_back = (-total) % n_months  # round up to a multiple of 12
+    padded = np.concatenate([
+        np.full(pad_front, np.nan),
+        enso_data,
+        np.full(pad_back, np.nan),
+    ])
+    reshaped_data = padded.reshape(-1, n_months)
+
     # Create DataFrame with 3-month season labels
     months = ['DJF', 'JFM', 'FMA', 'MAM', 'AMJ', 'MJJ', 'JJA', 'JAS', 'ASO', 'SON', 'OND', 'NDJ']
     df_enso = pd.DataFrame(reshaped_data, columns=months)
     df_enso.index.name = 'Year'
     df_enso.index = df_enso.index + 1
-    
+
     return df_enso
 
 
@@ -93,6 +106,9 @@ def style_enso_table(df_enso, threshold=0.5):
         for i in range(len(df)):
             for j in range(len(df.columns)):
                 val = df.iloc[i, j]
+                if pd.isna(val):
+                    styles.iloc[i, j] = 'background-color: white'  # calendar padding: blank
+                    continue
                 bold = 'font-weight: bold' if (i, j) in peaks else 'font-weight: normal'
                 if val > threshold:
                     styles.iloc[i, j] = f'background-color: #FFB3B3; color: red; {bold}'
@@ -102,29 +118,33 @@ def style_enso_table(df_enso, threshold=0.5):
                     styles.iloc[i, j] = f'background-color: #E8E8E8; color: black; {bold}'
         return styles
 
-    styler = df_enso.style.format("{:.2f}").apply(style_func, axis=None)
+    # NaN (calendar padding) renders as an empty cell rather than "nan".
+    styler = (df_enso.style
+              .format(lambda v: "" if pd.isna(v) else f"{v:.2f}")
+              .apply(style_func, axis=None))
     return styler
 
 
-def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", threshold=0.5, 
-                          wandb_enabled=False):
+def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", threshold=0.5,
+                          wandb_enabled=False, start_month=0):
     """
     Save ENSO table as an interactive HTML file.
-    
+
     Args:
         enso_traj (array): ENSO time series (already ONI)
         output_path (str): Path to save HTML file
         threshold (float): Threshold for coloring
         wandb_enabled (bool): Log to W&B
-        
+        start_month (int): 0-based calendar month of the first value (see create_enso_table)
+
     Returns:
         str: Path to saved file
     """
     import os
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    
+
     # Create and style table
-    df_enso = create_enso_table(enso_traj, threshold)
+    df_enso = create_enso_table(enso_traj, threshold, start_month=start_month)
     styler = style_enso_table(df_enso, threshold)
     
     # Add metadata to HTML
@@ -164,7 +184,8 @@ def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", thresho
     return output_path
 
 
-def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", threshold=0.5):
+def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", threshold=0.5,
+                               start_month=0):
     """
     Save ENSO table as a PNG image using matplotlib.
 
@@ -172,6 +193,7 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
         enso_traj (array): ENSO time series (already ONI)
         output_path (str): Path to save PNG file
         threshold (float): Threshold for coloring
+        start_month (int): 0-based calendar month of the first value (see create_enso_table)
 
     Returns:
         str: Path to saved file
@@ -180,16 +202,16 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     
     # Create and style table
-    df_enso = create_enso_table(enso_traj, threshold)
-    
+    df_enso = create_enso_table(enso_traj, threshold, start_month=start_month)
+
     # Create figure
     fig, ax = plt.subplots(figsize=(16, 10))
     ax.axis('tight')
     ax.axis('off')
-    
-    # Create table
-    # Format cell values to max 2 decimal places
-    cell_text = np.array([[f"{val:.2f}" for val in row] for row in df_enso.values])
+
+    # Create table. NaN (calendar padding) renders as a blank cell.
+    cell_text = np.array([["" if pd.isna(val) else f"{val:.2f}" for val in row]
+                          for row in df_enso.values])
     
     table = ax.table(cellText=cell_text, 
                      colLabels=df_enso.columns,
@@ -208,6 +230,10 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
         for j in range(len(df_enso.columns)):
             val = df_enso.iloc[i, j]
             cell = table[(i+1, j)]
+            if pd.isna(val):
+                cell.set_facecolor('white')  # calendar padding: blank
+                cell.set_text_props(ha='center', va='center')
+                continue
             is_peak = (i, j) in peaks
             weight = 'bold' if is_peak else 'normal'
 
@@ -250,19 +276,20 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     return output_path
 
 
-def log_enso_table_wandb(enso_traj, threshold=0.5):
+def log_enso_table_wandb(enso_traj, threshold=0.5, start_month=0):
     """
     Log styled ENSO table directly to W&B as rendered HTML.
 
     Args:
         enso_traj (array): ENSO time series (already ONI)
         threshold (float): Threshold for coloring
+        start_month (int): 0-based calendar month of the first value (see create_enso_table)
     """
     if wandb.run is None:
         print("[WARNING] W&B not initialized. Skipping W&B table logging.")
         return
 
-    df_enso = create_enso_table(enso_traj, threshold)
+    df_enso = create_enso_table(enso_traj, threshold, start_month=start_month)
     styler = style_enso_table(df_enso, threshold)
     wandb.log({"enso_table": wandb.Html(styler.to_html())})
     print("[OK] Styled ENSO table logged to W&B")
