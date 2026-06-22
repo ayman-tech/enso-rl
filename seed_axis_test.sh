@@ -20,7 +20,7 @@
 # export thread caps (OMP_NUM_THREADS=1 etc.) in your slurm script so the workers
 # don't oversubscribe.
 #
-# Models:  baseline -> models/<PREFIX>.zip
+# Models:  baseline -> models/<PREFIX>_seed<PIN>.zip
 #          sweep    -> models/<PREFIX>-<axis>_seed<w>-<a>-<b>-<i>-<p>.zip
 # Per-run stdout goes to $LOGDIR/<axis>-<v>.log (baseline.log).
 #
@@ -59,8 +59,8 @@ flag_for() {
 
 # Emit one full command per line for every run in the sweep.
 build_jobs() {
-  # baseline: all axes pinned at $PIN -> name has no seed suffix
-  echo "uv run scripts/train.py --epochs $EPOCHS --seed $PIN --name $PREFIX $EXTRA > $LOGDIR/baseline.log 2>&1"
+  # baseline: all axes pinned at $PIN -> name carries an explicit _seed<PIN> suffix
+  echo "uv run scripts/train.py --epochs $EPOCHS --seed $PIN --name ${PREFIX}_seed${PIN} $EXTRA > $LOGDIR/baseline.log 2>&1"
   for axis in $AXES; do
     local flag; flag="$(flag_for "$axis")"
     for v in $SWEEP; do

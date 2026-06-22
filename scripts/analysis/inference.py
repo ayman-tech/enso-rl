@@ -215,13 +215,15 @@ def main():
     rollout_seeds   = np.zeros((n_seeds, n_r),         dtype=np.int64)
     rollout_start_month = np.zeros((n_seeds, n_r),     dtype=np.int8)  # 0-based calendar month of step 0
 
-    # Precompute each seed's rollout seeds in the parent (master_rng advances once
-    # per seed, in seed order) so the work is reproducible and order-independent —
-    # this makes the per-seed rollouts safe to run in parallel processes.
+    # Common random numbers ACROSS trained seeds: derive ONE set of rollout seeds
+    # from the master RNG and score every model on it. Because each model sees the
+    # identical eval draws, differencing across models cancels evaluation-draw noise,
+    # so the across-seed spread reflects only the trained weights — not which eval
+    # conditions a given model happened to be tested on. (Depends only on
+    # --master-seed, so it stays reproducible and order-independent for parallelism.)
+    r_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(n_r)]
     worker_args = []
     for si, seed in enumerate(valid_seeds):
-        seed_rng = np.random.default_rng(master_rng.integers(0, 2**31))
-        r_seeds = [int(seed_rng.integers(0, 2**31)) for _ in range(n_r)]
         rollout_seeds[si] = r_seeds
         worker_args.append((si, seed, f"{args.model}_seed{seed}", r_seeds, T, env_config))
 
