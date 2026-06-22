@@ -143,7 +143,9 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     obs, _ = env.reset(seed=seed)
     sim_enso_history = [obs[0]]
     actions_history = []
-    states_history = [obs[:-1]]
+    # Record only the raw modes; obs now also carries month + duration + phase
+    # features after the modes, so slice by n_modes rather than dropping a fixed tail.
+    states_history = [obs[:env.n_modes]]
     total_rewards = 0.0
     
     if debug_mode:
@@ -170,7 +172,7 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         obs, reward, terminated, truncated, _ = env.step(action)
         total_rewards += reward
         sim_enso_history.append(obs[0])
-        states_history.append(obs[:-1])
+        states_history.append(obs[:env.n_modes])
     
     end_time = time.perf_counter()
     elapsed = end_time - start_time
