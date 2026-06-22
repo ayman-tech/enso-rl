@@ -17,6 +17,7 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
 import wandb
+import torch as th
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
@@ -24,6 +25,7 @@ from stable_baselines3 import PPO
 # Import configurations and utilities
 from config import TrainConfig, EnvConfig, WandbConfig
 from utils import suppress_warnings, timer
+from utils.seeding import SeedBundle, resolve_seeds, model_name
 from utils.data_processing import (
     load_observational_data, 
     prepare_xro_parameters
@@ -72,14 +74,16 @@ def setup_environment(config: EnvConfig):
     return obs_ds, train_ds, var_names, bounds, params
 
 
-def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_config: EnvConfig):
+def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_config: EnvConfig,
+                     seeds: SeedBundle = None):
     """
     Initialize Weights & Biases tracking.
-    
+
     Args:
         wandb_config (WandbConfig): W&B configuration
         train_config (TrainConfig): Training configuration
         env_config (EnvConfig): Environment configuration
+        seeds (SeedBundle): Resolved per-axis seeds, logged for provenance.
     """
     print("\n3. Initializing Weights & Biases...")
     
@@ -99,7 +103,9 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
         "learning_rate": train_config.learning_rate,
         "n_steps": train_config.n_steps,
     }
-    
+    if seeds is not None:
+        hyperparameters.update(seeds.as_log_dict())
+
     wandb.config.update(hyperparameters)
     print(f"\t[OK] W&B initialized")
     print(f"\t[OK] View experiment at: {wandb.run.url}")
@@ -107,7 +113,7 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
 
 @timer
 def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
-                    eval_env=None):
+                    seeds: SeedBundle, eval_env=None):
     """
     Train PPO agent on the environment.
 
@@ -115,6 +121,12 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
         env: Gymnasium environment
         train_config (TrainConfig): Training configuration
         wandb_config (WandbConfig): W&B configuration
+        seeds (SeedBundle): Resolved per-axis seeds. `weight` seeds policy weight
+            initialization (axis #1); `action` seeds the stochastic Gaussian
+            exploration sampled from the policy via the PyTorch RNG (axis #2);
+            `shuffle` seeds PPO's global-NumPy mini-batch shuffle (axis #3). The
+            env-side axes (#4 start state, #5 physics noise) are seeded on the env
+            objects themselves.
         eval_env: Separate env for periodic mye_prob evaluation (not the training
             env, whose rollout would be corrupted by eval resets). If None, the
             mye_prob eval callback is skipped.
@@ -128,24 +140,34 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
     print(f"Total timesteps: {round(train_config.train_months/12):,} yrs or {train_config.train_months:,} months")
     print(f"Learning rate: {train_config.learning_rate}")
     print(f"Update frequency (n_steps): {train_config.n_steps}")
-    
+
     # Capture verbose output
     output_buffer = io.StringIO()
     old_stdout = sys.stdout
     sys.stdout = output_buffer
-    
+
     try:
-        # Create and train model
+        # Create model. PPO(seed=...) seeds the PyTorch RNG used for weight init
+        # (axis #1) at construction.
         model = PPO(
             policy="MlpPolicy",
             env=env,
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
             gamma=0.99,
-            seed=train_config.seed,
+            seed=seeds.weight,
             verbose=1
         )
-        
+
+        # Re-seed the two remaining optimization-side axes just before learning so
+        # they are independent of weight init: the PyTorch RNG now drives action
+        # sampling (axis #2) and the global NumPy RNG drives the mini-batch shuffle
+        # (axis #3). The physics global-RNG isolation in xro_step keeps #3 clean.
+        if seeds.action is not None:
+            th.manual_seed(seeds.action)
+        if seeds.shuffle is not None:
+            np.random.seed(seeds.shuffle)
+
         # Train with W&B callback (+ periodic mye_prob evaluation if eval_env given)
         callbacks = [WandbCallback(verbose=1)]
         if eval_env is not None:
@@ -248,7 +270,17 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
-    parser.add_argument("--seed", type=int, default=None, help="PPO random seed (reproducibility / ensembles)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Master random seed. By default every randomness axis "
+                             "(weight/action/shuffle/init/physics) uses this value.")
+    # Per-axis seed overrides for the randomness-sensitivity study. Override one axis
+    # while the rest stay pinned at --seed to attribute outcome variance to that axis.
+    # Requires --seed to be set.
+    parser.add_argument("--seed-weight", type=int, default=None, help="Override seed: policy weight init")
+    parser.add_argument("--seed-action", type=int, default=None, help="Override seed: Gaussian exploration")
+    parser.add_argument("--seed-batch", type=int, default=None, help="Override seed: mini-batch shuffle")
+    parser.add_argument("--seed-init", type=int, default=None, help="Override seed: env start state")
+    parser.add_argument("--seed-physics", type=int, default=None, help="Override seed: XRO climate noise")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument("--name", type=str, default="train-run", help="Name of WandB training Run")
     args = parser.parse_args()
@@ -266,16 +298,30 @@ def main():
         train_config.train_months = args.epochs * train_config.n_steps
     if args.lr:
         train_config.learning_rate = args.lr
-    if args.seed is not None:
-        train_config.seed = args.seed
     if args.no_wandb:
         wandb_config.mode = "disabled"
-    if args.name:
-        wandb_config.name = args.name
-        train_config.model_save_path = "models/"+args.name
-    
+
+    # Resolve the five randomness-axis seeds. By default every axis uses --seed;
+    # per-axis overrides (raises if given without --seed) drive the sensitivity study.
+    seeds = resolve_seeds(args.seed, {
+        "weight": args.seed_weight,
+        "action": args.seed_action,
+        "shuffle": args.seed_batch,
+        "init": args.seed_init,
+        "physics": args.seed_physics,
+    })
+    train_config.seed = seeds.weight  # kept for any downstream reference/logging
+
+    # Model name: encode all five seeds when an override is present so ablation runs
+    # are distinguishable on disk; otherwise keep the name as-is (master convention).
+    save_name = model_name(args.name, seeds)
+    wandb_config.name = save_name
+    train_config.model_save_path = "models/" + save_name
+
     print("\n")
     print("-"*20 + "ENSO RL AGENT TRAINING PIPELINE" + "-"*20)
+    print(f"Seeds: {seeds.as_log_dict()}")
+    print(f"Model name: {save_name}")
     
     try:
         start_time = time.time()
@@ -285,20 +331,27 @@ def main():
         
         # Initialize W&B
         if wandb_config.mode != "disabled":
-            initialize_wandb(wandb_config, train_config, env_config)
+            initialize_wandb(wandb_config, train_config, env_config, seeds)
         
-        # Create environment
+        # Create environment. seed_init (#4) and seed_physics (#5) pin the two
+        # env-side randomness axes; reseed_on_reset=False so SB3's reset(seed=weight)
+        # cannot couple them to the weight axis.
         print("\n4. Creating Gymnasium environment...")
         env = XROMultiYearEnv(
             params=params,
             train_ds=train_ds,
             var_names=var_names,
-            max_steps=train_config.episode_length
+            max_steps=train_config.episode_length,
+            seed_init=seeds.init,
+            seed_physics=seeds.physics,
+            reseed_on_reset=False,
         )
         print("\t[OK] Environment created")
 
-        # Separate env for periodic mye_prob evaluation during training
-        # (kept distinct so eval resets don't corrupt the PPO rollout)
+        # Separate env for periodic mye_prob evaluation during training (kept distinct
+        # so eval resets don't corrupt the PPO rollout). Left unseeded: it only feeds
+        # the logged mye_prob curve and, thanks to the global-RNG isolation in
+        # xro_step, cannot perturb the training shuffle or the trained model.
         eval_env = XROMultiYearEnv(
             params=params,
             train_ds=train_ds,
@@ -307,7 +360,7 @@ def main():
         )
 
         # Train
-        model = train_ppo_agent(env, train_config, wandb_config, eval_env=eval_env)
+        model = train_ppo_agent(env, train_config, wandb_config, seeds, eval_env=eval_env)
         
         # Evaluate
         evaluate_trained_model(env, model)

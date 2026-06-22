@@ -65,7 +65,16 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
     input_ds = xr.Dataset(data_dict)
 
     # 3. Compute Dynamics using model.simulate
+    #
+    # XRO.gen_noise seeds and draws from the GLOBAL NumPy RNG (np.random.seed +
+    # np.random.normal) on every call. That global RNG is also what PPO's mini-batch
+    # shuffle uses, so an unguarded simulate would (a) clobber the shuffle ordering
+    # (entangling the physics-noise axis with the shuffle axis) and (b) let the eval
+    # environment perturb training. Snapshot and restore the global RNG state around
+    # the call to isolate XRO's noise. Physics noise stays reproducible because the
+    # per-step seed below comes from `rng` (the env's physics generator, axis #5).
     seed = int(rng.integers(0, 1_000_000))
+    np_state = np.random.get_state()
     try:
         prediction_ds = model.simulate(
             fit_ds=fit_ds,
@@ -89,6 +98,10 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
     except Exception as e:
         print(f"Warning: Simulation failed at step {step_idx}. Resetting state. Error: {e}")
         return np.zeros_like(state)
+    finally:
+        # Always restore the global NumPy RNG, even if simulate raised partway
+        # through gen_noise (which advances it).
+        np.random.set_state(np_state)
 
     # 5. Safety Clipping and NaN check
     for i, var_name in enumerate(var_names):

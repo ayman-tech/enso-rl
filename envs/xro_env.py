@@ -16,15 +16,29 @@ class XROMultiYearEnv(gym.Env):
     - Preserves multi-year ENSO memory and continuity
     """
     
-    def __init__(self, params, train_ds, var_names, max_steps=None):
+    def __init__(self, params, train_ds, var_names, max_steps=None,
+                 seed_init=None, seed_physics=None, reseed_on_reset=True):
         """
         Initialize XRO environment.
-        
+
         Args:
             params (dict): Parameters from data processing (model, fit_ds, etc.)
             train_ds: Training dataset (xarray)
             var_names (list): Variable names
             max_steps (int or None): Maximum steps per episode (None = continuous)
+            seed_init (int or None): Seed for the start-state sampling stream
+                (randomness axis #4). Independent of seed_physics so the two axes can
+                be studied separately.
+            seed_physics (int or None): Seed for the XRO climate-noise stream
+                (randomness axis #5). Each step draws one integer from this generator
+                to seed XRO.simulate.
+            reseed_on_reset (bool): If True (default), reset(seed=X) re-derives both
+                generators deterministically from X, so reset(seed) fixes both the
+                start state AND the noise sequence — the contract the paired-comparison
+                analyses in utils/evaluation.py depend on. If False (training env),
+                reset ignores the passed seed and the constructor-seeded generators
+                persist, so SB3's reset(seed=weight_seed) cannot couple axes #4/#5 to
+                the weight axis.
         """
         super(XROMultiYearEnv, self).__init__()
         self.params = params
@@ -33,7 +47,11 @@ class XROMultiYearEnv(gym.Env):
         self.n_modes = len(var_names)
         self.max_steps = max_steps
         self.current_step = 0
-        self.rng = np.random.default_rng()
+        self.month_offset = 0  # set per-reset to the sampled state's real month
+        # Independent RNG streams for the two environment randomness axes.
+        self.rng_init = np.random.default_rng(seed_init)        # axis #4: start state
+        self.rng_physics = np.random.default_rng(seed_physics)  # axis #5: climate noise
+        self._reseed_on_reset = reseed_on_reset
         
         # Action space: 9D continuous [-1, 1]
         self.action_space = spaces.Box(
@@ -91,14 +109,33 @@ class XROMultiYearEnv(gym.Env):
         self._realism_threshold = float(chi2.ppf(quantile, df=len(var_names)))
 
     def reset(self, seed=None):
-        """Reset environment to initial state."""
+        """Reset environment to initial state.
+
+        When reseed_on_reset is True and an explicit seed is given, both the
+        start-state and physics generators are re-derived deterministically from it
+        (two independent sub-streams), so the same seed fixes both the start state and
+        the noise sequence — required for the paired baseline/intervention analyses.
+        When False (training env), the constructor-seeded generators persist and the
+        passed seed is ignored, keeping axes #4/#5 decoupled from SB3's reset seed.
+        """
         super().reset(seed=seed)
-        self.rng = np.random.default_rng(seed)
+        if self._reseed_on_reset and seed is not None:
+            ci, cp = np.random.SeedSequence(seed).spawn(2)
+            self.rng_init = np.random.default_rng(ci)
+            self.rng_physics = np.random.default_rng(cp)
 
         # Generate random starting date
-        random_year = self.rng.integers(1979, 2023)
-        random_month = self.rng.integers(1, 13)
+        random_year = self.rng_init.integers(1979, 2023)
+        random_month = self.rng_init.integers(1, 13)
         self.state = np.array(get_data(self.train_ds, self.var_names, random_year, random_month), dtype=np.float32)
+
+        # Align the seasonal clock to the sampled state's real calendar month so
+        # the state evolves under its true season (e.g. an August state advances
+        # through Sep, Oct, ...) instead of being pinned to January. ENSO is
+        # strongly seasonally phase-locked, so injecting a real state at the
+        # wrong calendar phase is physically inconsistent. month_offset shifts
+        # current_step (0-based) onto the real month (also 0-based).
+        self.month_offset = int(random_month) - 1
 
         self.current_step = 0
         self.enso_history = [self.state[0]]
@@ -109,7 +146,7 @@ class XROMultiYearEnv(gym.Env):
 
     def _get_obs(self):
         """Get observation (state + month feature)."""
-        month_feature = (self.current_step % 12) / 12.0
+        month_feature = ((self.current_step + self.month_offset) % 12) / 12.0
         return np.concatenate([self.state, [month_feature]], dtype=np.float32)
 
     def step(self, action):
@@ -122,8 +159,10 @@ class XROMultiYearEnv(gym.Env):
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
-        # Step the model
-        self.state = xro_step(self.state, self.params, action, self.rng, self.current_step)
+        # Step the model. Pass the season-aligned calendar index so the XRO
+        # seasonal parameters match the state's real month (see month_offset).
+        self.state = xro_step(self.state, self.params, action, self.rng_physics,
+                              self.current_step + self.month_offset)
         self.enso_history.append(self.state[0])
         self.current_step += 1
         
