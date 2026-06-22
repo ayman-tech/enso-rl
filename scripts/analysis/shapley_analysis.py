@@ -1,32 +1,18 @@
 """
-Shapley Value Analysis for ENSO RL Agent Actions.
+Shapley Value Analysis for ENSO RL Agent Actions (ensemble mode).
 
-Computes Shapley values for each action dimension using sampling-based
-approximation (permutation sampling). Uses N independent paired-seed runs
-for statistical robustness with t-tests, 95% CIs, and significance testing.
-Uses multiprocessing to parallelize across independent seed runs.
+Computes permutation-sampling Shapley values aggregated across independently
+trained seeds; saves results for notebook plotting.
 
 Usage:
-    uv run scripts/shapley_analysis.py --model rl_model
-    uv run scripts/shapley_analysis.py --model rl_model --months 1200 --metric mye_prob --n-runs 30 --n-permutations 20
-    uv run scripts/shapley_analysis.py --model rl_model --no-wandb
-Params meaning :
-    n-runs: No of independent seeded simulation runs for statistical robustness (each produces one set of Shapley values; used for t-tests and confidence intervals).
-    n-permutations: No of random action orderings sampled/run to approximate the Shapley values (more = better approximation of the combinatorial sum).
-
-Robust run :
-    uv run scripts/analysis/shapley_analysis.py \
-        --model rl_model --metric mye_prob --months 2400 \
-        --n-runs 100 --n-permutations 100
+    uv run scripts/analysis/shapley_analysis.py --model ensemble \
+        --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 30 --months 1200
 """
 import sys
 import os
 import time
 import argparse
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import wandb
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +25,7 @@ repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from utils import suppress_warnings
+from utils.results_io import save_csv
 
 # Fixed variable names — avoids loading PyTorch in main process before fork
 ACTION_NAMES = ['WWV', 'NPMM', 'SPMM', 'IOB', 'IOD', 'SIOD', 'TNA', 'ATL3', 'SASD']
@@ -258,93 +245,6 @@ def compute_statistics(shapley_per_run, action_names):
     return stats
 
 
-def plot_shapley_values(stats, shapley_per_run, action_names, n_runs, output_dir, metric='mye_prob'):
-    """Generate Shapley value plots with significance annotations."""
-    metric_label = METRIC_LABELS.get(metric, metric)
-
-    # Sort by absolute mean Shapley value
-    sorted_idx = np.argsort([abs(s['mean']) for s in stats])[::-1]
-
-    sorted_names = [stats[i]['feature'] for i in sorted_idx]
-    sorted_means = [stats[i]['mean'] for i in sorted_idx]
-    sorted_cis = [stats[i]['ci_95'] for i in sorted_idx]
-    sorted_pvals = [stats[i]['p_value'] for i in sorted_idx]
-
-    # Color by significance & direction
-    colors = []
-    edge_colors = []
-    for s_idx in sorted_idx:
-        s = stats[s_idx]
-        if s['p_value'] >= 0.05:
-            colors.append('#999999')
-            edge_colors.append('#CCCCCC')
-        elif s['mean'] > 0:
-            colors.append('#D32F2F')
-            edge_colors.append('black')
-        else:
-            colors.append('#1976D2')
-            edge_colors.append('black')
-
-    # --- Bar Chart with CIs + significance stars ---
-    fig, ax = plt.subplots(figsize=(14, 7))
-    bars = ax.bar(sorted_names, sorted_means, color=colors, edgecolor=edge_colors,
-                  linewidth=1.5, yerr=sorted_cis, capsize=6,
-                  error_kw={'linewidth': 1.5, 'capthick': 1.5})
-
-    for i, (mean_val, ci_val, p_val) in enumerate(zip(sorted_means, sorted_cis, sorted_pvals)):
-        star = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
-        y_pos = mean_val + ci_val + 0.001 if mean_val >= 0 else mean_val - ci_val - 0.001
-        va = 'bottom' if mean_val >= 0 else 'top'
-        ax.text(i, y_pos, star, ha='center', va=va, fontsize=11, fontweight='bold')
-
-    ax.axhline(0, color='gray', linestyle='--', linewidth=0.8)
-    ax.set_xlabel('Action Variable', fontsize=13)
-    ax.set_ylabel(f'Mean Shapley Value ± 95% CI (N={n_runs})', fontsize=13)
-    ax.set_title(f'Shapley Analysis: Action Importance — {metric_label}', fontsize=15)
-    ax.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
-    ax.grid(axis='y', alpha=0.3)
-
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#D32F2F', edgecolor='black', label='Significant positive (p<0.05)'),
-        Patch(facecolor='#1976D2', edgecolor='black', label='Significant negative (p<0.05)'),
-        Patch(facecolor='#999999', edgecolor='#CCCCCC', label='Not significant (p≥0.05)'),
-    ]
-    ax.legend(handles=legend_elements, fontsize=11)
-    fig.tight_layout()
-    fig.savefig(output_dir / 'shapley_values_bar.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / 'shapley_values_bar.png'}")
-
-    # --- Boxplot of per-run Shapley values ---
-    fig2, ax2 = plt.subplots(figsize=(14, 7))
-    bp = ax2.boxplot(
-        [shapley_per_run[:, i] for i in sorted_idx],
-        labels=sorted_names, patch_artist=True, vert=True
-    )
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-
-    ax2.axhline(0, color='gray', linestyle='--', linewidth=0.8)
-    ax2.set_xlabel('Action Variable', fontsize=13)
-    ax2.set_ylabel(f'Shapley Value (N={n_runs} independent runs)', fontsize=13)
-    ax2.set_title(f'Distribution of Shapley Values — {metric_label}', fontsize=15)
-    ax2.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
-    ax2.grid(axis='y', alpha=0.3)
-    fig2.tight_layout()
-    fig2.savefig(output_dir / 'shapley_values_dist.png', dpi=150, bbox_inches='tight')
-    plt.close(fig2)
-    print(f"  Saved {output_dir / 'shapley_values_dist.png'}")
-
-    # Log plots to W&B
-    if wandb.run is not None:
-        wandb.log({
-            "shapley_bar_chart": wandb.Image(str(output_dir / 'shapley_values_bar.png')),
-            "shapley_distribution": wandb.Image(str(output_dir / 'shapley_values_dist.png')),
-        })
-
-
 PHASE_METRICS = {'total': 'mye_prob', 'el_nino': 'mye_prob_el_nino',
                  'la_nina': 'mye_prob_la_nina'}
 
@@ -411,7 +311,7 @@ def run_ensemble(args, output_dir):
     n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
     n_workers = min(n_workers, len(args.seeds))  # no more workers than tasks
 
-    worker_args = [(s, f"{args.prefix}_seed{s}", args.months, args.n_runs,
+    worker_args = [(s, f"{args.model}_seed{s}", args.months, args.n_runs,
                     args.n_permutations, args.master_seed, env_seeds)
                    for s in args.seeds]
 
@@ -428,7 +328,7 @@ def run_ensemble(args, output_dir):
     for s in args.seeds:
         _, out = by_seed[s]
         if out is None:
-            print(f"  [skip] models/{args.prefix}_seed{s}.zip not found", flush=True)
+            print(f"  [skip] models/{args.model}_seed{s}.zip not found", flush=True)
             continue
         for p in phases:
             per_seed[p].append(out[p])
@@ -442,188 +342,77 @@ def run_ensemble(args, output_dir):
     save_kw = {'features': np.array(feat), 'phases': np.array(phases),
                'seeds': np.array(used), 'n_runs': args.n_runs,
                'months': args.months, 'n_permutations': args.n_permutations}
+    from scipy.stats import ttest_1samp
     for p in phases:
         M = np.vstack(per_seed[p])
         mean = M.mean(axis=0)
         ci = (t_dist.ppf(0.975, df=n_seeds - 1) * M.std(axis=0, ddof=1) / np.sqrt(n_seeds)
               if n_seeds > 1 else np.zeros_like(mean))
+        pvals = (np.array([ttest_1samp(M[:, fi], 0).pvalue for fi in range(M.shape[1])])
+                 if n_seeds > 1 else np.ones(M.shape[1]))
         save_kw[f'mean_{p}'] = mean
         save_kw[f'ci_{p}'] = ci
+        save_kw[f'p_{p}'] = pvals
+        save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
         print(f"\n  === Shapley ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
         for fi in np.argsort(mean)[::-1]:
-            print(f"    {feat[fi]:<10} {mean[fi]:+.5f} ± {ci[fi]:.5f}")
+            sig = "***" if pvals[fi] < 0.001 else "**" if pvals[fi] < 0.01 else "*" if pvals[fi] < 0.05 else "ns"
+            print(f"    {feat[fi]:<10} {mean[fi]:+.5f} ± {ci[fi]:.5f}  {sig}")
 
     np.savez(output_dir / 'shapley_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'shapley_ensemble.npz'}")
+
+    # Tidy CSVs alongside the npz (survive lost logs; easy notebook loading).
+    summary_rows, per_seed_rows = [], []
+    for p in phases:
+        for fi, feature in enumerate(feat):
+            summary_rows.append({'phase': p, 'feature': feature,
+                                 'mean_shapley': float(save_kw[f'mean_{p}'][fi]),
+                                 'ci95': float(save_kw[f'ci_{p}'][fi]),
+                                 'p': float(save_kw[f'p_{p}'][fi])})
+            for si, s in enumerate(used):
+                per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feature,
+                                      'shapley': float(save_kw[f'per_seed_{p}'][si, fi])})
+    save_csv(output_dir / 'shapley_ensemble.csv', summary_rows)
+    save_csv(output_dir / 'shapley_ensemble_per_seed.csv', per_seed_rows)
 
 
 def main():
     # Use 'spawn' to avoid PyTorch fork deadlocks on Linux
     mp.set_start_method('spawn', force=True)
 
-    parser = argparse.ArgumentParser(description="Shapley Value Analysis for ENSO RL Agent")
-    parser.add_argument("--model", type=str, default="rl_model", help="Path to trained model")
+    parser = argparse.ArgumentParser(description="Shapley Value Analysis (ensemble)")
+    parser.add_argument("--model", type=str, default="ensemble", help="Ensemble model prefix")
     parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
-    parser.add_argument("--n-runs", type=int, default=30, help="Number of independent seeds (paired trials)")
+    parser.add_argument("--n-runs", type=int, default=30, help="Independent paired runs per seed")
     parser.add_argument("--n-permutations", type=int, default=20, help="Permutations per run")
-    parser.add_argument("--metric", type=str, default="mye_prob",
-                        choices=["mye_prob", "enso_months", "avg_reward"],
-                        help="Value function for Shapley analysis (default: mye_prob)")
-    parser.add_argument("--ensemble", action="store_true",
-                        help="Aggregate Shapley across trained seeds, per phase")
-    parser.add_argument("--prefix", type=str, default="rl_model", help="Ensemble model prefix")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
                         help="Ensemble seeds")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     parser.add_argument("--workers", type=int, default=None,
-                        help="Number of parallel workers (default: cpu_count - 1)")
+                        help="Parallel workers (default: cpu_count - 2; use 1 for serial)")
     parser.add_argument("--no-wandb", action="store_true",
-                        help="Disable W&B logging (useful for HPC without internet)")
+                        help="Disable W&B logging")
     args = parser.parse_args()
 
-    if args.ensemble:
-        suppress_warnings()
-        np.random.seed(args.master_seed)
-        out = Path("plots") / args.prefix / "shapley" / "ensemble"
-        out.mkdir(parents=True, exist_ok=True)
-        print("=" * 70, flush=True)
-        print("SHAPLEY — ENSEMBLE (cross-seed, phase-resolved)", flush=True)
-        print("=" * 70, flush=True)
-        run_ensemble(args, out)
-        return
-
-    # No PyTorch imports in main process — workers handle their own
     suppress_warnings()
     np.random.seed(args.master_seed)
+    out = Path("plots") / args.model / "shapley"
+    out.mkdir(parents=True, exist_ok=True)
 
-    output_dir = Path("plots") / args.model / "shapley" / args.metric
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
-    action_names = ACTION_NAMES
-
-    if not args.no_wandb:
-        from config import WandbConfig
-        wandb_config = WandbConfig()
-        run_name = datetime.now().strftime(r"shapely %H:%M %d-%m-%y")
-        wandb.init(
-            project=wandb_config.project,
-            entity=wandb_config.entity,
-            name=run_name,
-            job_type="shapley-analysis",
-            group="analysis",
-            tags=["shapley", "analysis", args.metric],
-            config={
-                "model": args.model,
-                "months": args.months,
-                "n_runs": args.n_runs,
-                "n_permutations": args.n_permutations,
-                "metric": args.metric,
-                "master_seed": args.master_seed,
-                "n_workers": n_workers,
-            },
-        )
-
+    print("=" * 70, flush=True)
+    print("SHAPLEY — ENSEMBLE (cross-seed, phase-resolved)", flush=True)
+    print("=" * 70, flush=True)
     start_time = time.time()
 
-    print("=" * 70)
-    print("SHAPLEY VALUE ANALYSIS FOR ENSO RL AGENT")
-    print("=" * 70)
+    run_ensemble(args, out)
 
-    # Generate shared seeds from master RNG
-    master_rng = np.random.default_rng(args.master_seed)
-    shared_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
-
-    # Generate independent permutation seeds for each worker (reproducibility)
-    perm_rng = np.random.default_rng(args.master_seed + 1)
-    perm_seeds = [int(perm_rng.integers(0, 2**31)) for _ in range(args.n_runs)]
-
-    n_actions = 9
-    total_sims = args.n_runs * args.n_permutations * (n_actions + 1)
-    print(f"\n  N_RUNS          = {args.n_runs}")
-    print(f"  N_PERMUTATIONS  = {args.n_permutations}")
-    print(f"  METRIC          = {args.metric} ({METRIC_LABELS[args.metric]})")
-    print(f"  SIM_MONTHS      = {args.months} ({args.months // 12} years)")
-    print(f"  Total sims      = {total_sims}")
-    print(f"  Workers         = {n_workers}")
-    print(f"  W&B             = {'enabled' if not args.no_wandb else 'disabled'}")
-    print(f"{'=' * 70}\n", flush=True)
-
-    # Build worker args
-    worker_args = [
-        (run_idx, seed, args.model, args.months, args.n_permutations, args.metric, perm_seeds[run_idx])
-        for run_idx, seed in enumerate(shared_seeds)
-    ]
-
-    # Run in parallel
-    shapley_per_run = np.zeros((args.n_runs, n_actions))
-
-    with mp.Pool(processes=n_workers) as pool:
-        results = pool.map(_worker_shapley, worker_args)
-
-    for run_idx, sv, marginals in results:
-        shapley_per_run[run_idx] = sv
-
-        # Log per-run Shapley values to W&B
-        if wandb.run is not None:
-            run_log = {f"shapley/{name}": sv[i] for i, name in enumerate(action_names)}
-            run_log["run_idx"] = run_idx
-            wandb.log(run_log)
-
-    # Statistical analysis
-    stats = compute_statistics(shapley_per_run, action_names)
-
-    print(f"\n{'='*100}")
-    print(f"PAIRED SHAPLEY ANALYSIS — Statistical Summary (N={args.n_runs} runs)")
-    print(f"{'='*100}")
-    print(f"{'Feature':<10} | {'Mean SV':>10} | {'Std':>8} | {'95% CI':>20} | {'p-value':>10} | {'Sig?':>6}")
-    print(f"{'-'*80}")
-
-    for s in sorted(stats, key=lambda x: x['mean'], reverse=True):
-        ci_lo = s['mean'] - s['ci_95']
-        ci_hi = s['mean'] + s['ci_95']
-        sig = "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
-        print(f"{s['feature']:<10} | {s['mean']:>+10.6f} | {s['std']:>8.6f} | [{ci_lo:>+9.6f}, {ci_hi:>+9.6f}] | {s['p_value']:>10.4f} | {sig:>6}")
-
-    print(f"\nSum of Shapley values (mean): {shapley_per_run.mean(axis=0).sum():.6f}")
-    print("(Should ≈ V(all actions) - V(no actions))")
-    print(f"\nSignificance: *** p<0.001, ** p<0.01, * p<0.05, ns = not significant")
-
-    # Log summary statistics to W&B
-    if wandb.run is not None:
-        summary_table = wandb.Table(
-            columns=["Feature", "Mean SV", "Std", "CI Low", "CI High", "p-value", "Significance"],
-            data=[
-                [
-                    s['feature'], s['mean'], s['std'],
-                    s['mean'] - s['ci_95'], s['mean'] + s['ci_95'],
-                    s['p_value'],
-                    "***" if s['p_value'] < 0.001 else "**" if s['p_value'] < 0.01 else "*" if s['p_value'] < 0.05 else "ns"
-                ]
-                for s in sorted(stats, key=lambda x: abs(x['mean']), reverse=True)
-            ]
-        )
-        wandb.log({"shapley_summary": summary_table})
-
-    # Save
-    np.savez(
-        output_dir / 'shapley_results.npz',
-        shapley_per_run=shapley_per_run,
-        action_names=action_names,
-        n_runs=args.n_runs,
-        n_permutations=args.n_permutations,
-        months=args.months,
-        metric=args.metric,
-        seeds=shared_seeds,
-    )
-    print(f"\nResults saved to {output_dir / 'shapley_results.npz'}")
-
-    # Plot
-    print("\nGenerating plots...")
-    plot_shapley_values(stats, shapley_per_run, action_names, args.n_runs, output_dir, metric=args.metric)
-
-    if wandb.run is not None:
-        wandb.finish()
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    print(f"\n{'='*70}")
+    print(f"SHAPLEY ANALYSIS COMPLETE — Total time: {hours}h {minutes}m {seconds}s")
+    print(f"{'='*70}")
 
     elapsed = time.time() - start_time
     hours, remainder = divmod(int(elapsed), 3600)

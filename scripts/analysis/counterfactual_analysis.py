@@ -1,21 +1,12 @@
 """
-Counterfactual Trajectory Analysis for ENSO RL Agent.
+Counterfactual Trajectory Analysis for ENSO RL Agent (ensemble mode).
 
-Instead of disabling actions (setting to zero), clamps each action to its
-empirical mean. This removes variation while preserving the average contribution,
-providing a more precise counterfactual than zero-ablation.
-
-Uses paired seeded runs for statistical robustness.
+Zero-ablates each action dimension to measure driver importance via counterfactual.
+Aggregates across independently trained seeds; saves results for notebook plotting.
 
 Usage:
-    uv run scripts/analysis/counterfactual_analysis.py --model rl_model
-    uv run scripts/analysis/counterfactual_analysis.py --model rl-model --n-runs 30 --months 1200
-    uv run scripts/analysis/counterfactual_analysis.py --model rl_model --metric mye_prob
-
-Robust :
-    uv run scripts/analysis/counterfactual_analysis.py \
-        --model rl_model --metric mye_prob \
-        --months 2400 --n-runs 100
+    uv run scripts/analysis/counterfactual_analysis.py --model ensemble \
+        --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 20 --months 1200
 """
 import sys
 import time
@@ -23,7 +14,6 @@ import argparse
 import multiprocessing as mp
 from multiprocessing import cpu_count
 import numpy as np
-import matplotlib.pyplot as plt
 import wandb
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +28,7 @@ from utils.data_processing import load_observational_data, prepare_xro_parameter
 from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
+from utils.results_io import save_csv
 from XRO.core import XRO
 
 METRIC_LABELS = {
@@ -283,103 +274,6 @@ def compute_statistics(results, metric='mye_prob'):
     return stats
 
 
-def plot_comparison(stats, n_runs, output_dir, metric='mye_prob'):
-    """Plot mean-clamp vs zero-ablation comparison."""
-    metric_label = METRIC_LABELS.get(metric, metric)
-    features = [s['feature'] for s in stats]
-    n = len(features)
-
-    # Sort by mean-clamp Δ magnitude
-    sorted_idx = np.argsort([abs(s['dr_mean_clamp']) for s in stats])[::-1]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 8), sharey=True)
-
-    x = np.arange(n)
-    width = 0.35
-
-    # Left: Mean-Clamped
-    sorted_features = [features[i] for i in sorted_idx]
-    clamp_vals = [stats[i]['dr_mean_clamp'] for i in sorted_idx]
-    clamp_cis = [stats[i]['ci_clamp'] for i in sorted_idx]
-    clamp_colors = ['#D32F2F' if stats[i]['p_clamp'] < 0.05 else '#999999' for i in sorted_idx]
-
-    ax1.bar(x, clamp_vals, width=0.6, color=clamp_colors, edgecolor='black',
-            yerr=clamp_cis, capsize=4, error_kw={'linewidth': 1.2})
-    ax1.axhline(0, color='gray', linestyle='--')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(sorted_features, rotation=45, ha='right')
-    ax1.set_ylabel(f'Mean Δ{metric_label} ± 95% CI (N={n_runs})', fontsize=13)
-    ax1.set_title(f'Counterfactual: Clamp to Mean — {metric_label}', fontsize=15)
-    ax1.grid(axis='y', alpha=0.3)
-
-    # Significance stars
-    for idx_pos, orig_idx in enumerate(sorted_idx):
-        p = stats[orig_idx]['p_clamp']
-        star = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
-        y = clamp_vals[idx_pos] + clamp_cis[idx_pos] + 0.001 if clamp_vals[idx_pos] >= 0 else clamp_vals[idx_pos] - clamp_cis[idx_pos] - 0.001
-        va = 'bottom' if clamp_vals[idx_pos] >= 0 else 'top'
-        ax1.text(idx_pos, y, star, ha='center', va=va, fontsize=10, fontweight='bold')
-
-    # Right: Zero-Ablated
-    zero_vals = [stats[i]['dr_zero'] for i in sorted_idx]
-    zero_cis = [stats[i]['ci_zero'] for i in sorted_idx]
-    zero_colors = ['#1976D2' if stats[i]['p_zero'] < 0.05 else '#999999' for i in sorted_idx]
-
-    ax2.bar(x, zero_vals, width=0.6, color=zero_colors, edgecolor='black',
-            yerr=zero_cis, capsize=4, error_kw={'linewidth': 1.2})
-    ax2.axhline(0, color='gray', linestyle='--')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(sorted_features, rotation=45, ha='right')
-    ax2.set_title(f'Classical Ablation: Set to Zero — {metric_label}', fontsize=15)
-    ax2.grid(axis='y', alpha=0.3)
-
-    for idx_pos, orig_idx in enumerate(sorted_idx):
-        p = stats[orig_idx]['p_zero']
-        star = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'ns'
-        y = zero_vals[idx_pos] + zero_cis[idx_pos] + 0.001 if zero_vals[idx_pos] >= 0 else zero_vals[idx_pos] - zero_cis[idx_pos] - 0.001
-        va = 'bottom' if zero_vals[idx_pos] >= 0 else 'top'
-        ax2.text(idx_pos, y, star, ha='center', va=va, fontsize=10, fontweight='bold')
-
-    fig.suptitle(f'Counterfactual vs Classical Ablation — {metric_label}', fontsize=17, y=1.02)
-    fig.tight_layout()
-    fig.savefig(output_dir / f'counterfactual_comparison_{metric}.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / f'counterfactual_comparison_{metric}.png'}")
-
-    # Scatter: clamp Δ vs zero Δ
-    fig2, ax3 = plt.subplots(figsize=(10, 10))
-    dr_clamp_all = [s['dr_mean_clamp'] for s in stats]
-    dr_zero_all = [s['dr_zero'] for s in stats]
-
-    ax3.scatter(dr_zero_all, dr_clamp_all, s=120, c='steelblue', edgecolor='black', zorder=5)
-    for i, feat in enumerate(features):
-        ax3.annotate(feat, (dr_zero_all[i], dr_clamp_all[i]),
-                     fontsize=10, ha='left', va='bottom', xytext=(5, 5),
-                     textcoords='offset points')
-
-    # Diagonal
-    lims = [min(min(dr_zero_all), min(dr_clamp_all)) - 0.01,
-            max(max(dr_zero_all), max(dr_clamp_all)) + 0.01]
-    ax3.plot(lims, lims, 'r--', alpha=0.5, label='Agreement line')
-    ax3.set_xlabel(f'Zero-Ablation Δ{metric_label}', fontsize=13)
-    ax3.set_ylabel(f'Mean-Clamp Δ{metric_label}', fontsize=13)
-    ax3.set_title(f'Method Agreement — {metric_label}', fontsize=15)
-    ax3.legend()
-    ax3.grid(alpha=0.3)
-    ax3.set_aspect('equal')
-    fig2.tight_layout()
-    fig2.savefig(output_dir / f'counterfactual_scatter_{metric}.png', dpi=150, bbox_inches='tight')
-    plt.close(fig2)
-    print(f"  Saved {output_dir / f'counterfactual_scatter_{metric}.png'}")
-
-    # Log plots to W&B
-    if wandb.run is not None:
-        wandb.log({
-            f"counterfactual_comparison_{metric}": wandb.Image(str(output_dir / f'counterfactual_comparison_{metric}.png')),
-            f"counterfactual_scatter_{metric}": wandb.Image(str(output_dir / f'counterfactual_scatter_{metric}.png')),
-        })
-
-
 def _phase_keys():
     return ['total', 'el_nino', 'la_nina']
 
@@ -454,7 +348,7 @@ def run_ensemble(args, output_dir):
     n_workers = args.workers if args.workers else max(1, cpu_count() - 2)
     n_workers = min(n_workers, len(args.seeds))  # no more workers than tasks
 
-    worker_args = [(s, f"{args.prefix}_seed{s}", args.months, args.n_runs, args.seed)
+    worker_args = [(s, f"{args.model}_seed{s}", args.months, args.n_runs, args.seed)
                    for s in args.seeds]
 
     if n_workers > 1:
@@ -470,7 +364,7 @@ def run_ensemble(args, output_dir):
     for s in args.seeds:
         _, controllable_s, seed_means = by_seed[s]
         if seed_means is None:
-            print(f"  [skip] models/{args.prefix}_seed{s}.zip not found")
+            print(f"  [skip] models/{args.model}_seed{s}.zip not found")
             continue
         if controllable is None:
             controllable = controllable_s
@@ -486,180 +380,72 @@ def run_ensemble(args, output_dir):
     n_seeds = len(used)
     save_kw = {'features': np.array(controllable), 'phases': np.array(phases),
                'seeds': np.array(used), 'n_runs': args.n_runs, 'months': args.months}
+    from scipy.stats import ttest_1samp
     for p in phases:
         M = np.vstack(per_seed[p])  # [n_seeds, n_features]
         mean = M.mean(axis=0)
         ci = (t_dist.ppf(0.975, df=n_seeds - 1) * M.std(axis=0, ddof=1) / np.sqrt(n_seeds)
               if n_seeds > 1 else np.zeros_like(mean))
+        pvals = (np.array([ttest_1samp(M[:, fi], 0).pvalue for fi in range(M.shape[1])])
+                 if n_seeds > 1 else np.ones(M.shape[1]))
         save_kw[f'mean_{p}'] = mean
         save_kw[f'ci_{p}'] = ci
+        save_kw[f'p_{p}'] = pvals
+        save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
         print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
         order = np.argsort(mean)
         for fi in order:
-            print(f"    {controllable[fi]:<10} {mean[fi]:+.4f} ± {ci[fi]:.4f}")
+            sig = "***" if pvals[fi] < 0.001 else "**" if pvals[fi] < 0.01 else "*" if pvals[fi] < 0.05 else "ns"
+            print(f"    {controllable[fi]:<10} {mean[fi]:+.4f} ± {ci[fi]:.4f}  {sig}")
 
     np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
 
+    # Tidy CSVs alongside the npz (survive lost logs; easy notebook loading).
+    summary_rows, per_seed_rows = [], []
+    for p in phases:
+        for fi, feat in enumerate(controllable):
+            summary_rows.append({'phase': p, 'feature': feat,
+                                 'mean_dP_MYE': float(save_kw[f'mean_{p}'][fi]),
+                                 'ci95': float(save_kw[f'ci_{p}'][fi]),
+                                 'p': float(save_kw[f'p_{p}'][fi])})
+            for si, s in enumerate(used):
+                per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feat,
+                                      'dP_MYE': float(save_kw[f'per_seed_{p}'][si, fi])})
+    save_csv(output_dir / 'counterfactual_ensemble.csv', summary_rows)
+    save_csv(output_dir / 'counterfactual_ensemble_per_seed.csv', per_seed_rows)
+
 
 def main():
-    # Use 'spawn' to avoid PyTorch fork deadlocks (matches shapley_analysis).
+    # Use 'spawn' to avoid PyTorch fork deadlocks.
     mp.set_start_method('spawn', force=True)
 
-    parser = argparse.ArgumentParser(description="Counterfactual Trajectory Analysis")
-    parser.add_argument("--model", type=str, default="rl_model", help="Path to trained model")
+    parser = argparse.ArgumentParser(description="Counterfactual Trajectory Analysis (ensemble)")
+    parser.add_argument("--model", type=str, default="ensemble", help="Ensemble model prefix")
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
-    parser.add_argument("--n-runs", type=int, default=20, help="Number of paired runs")
+    parser.add_argument("--n-runs", type=int, default=20, help="Number of paired runs per seed")
     parser.add_argument("--seed", type=int, default=42, help="Master seed")
-    parser.add_argument("--metric", type=str, default="mye_prob",
-                        choices=["avg_reward", "mye_prob"],
-                        help="Metric for analysis (default: mye_prob)")
-    parser.add_argument("--ensemble", action="store_true",
-                        help="Aggregate zero-ablation ΔP(MYE) across trained seeds, per phase")
-    parser.add_argument("--prefix", type=str, default="rl_model", help="Ensemble model prefix")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
                         help="Ensemble seeds")
     parser.add_argument("--workers", type=int, default=None,
-                        help="Parallel workers for --ensemble across seeds "
-                             "(default: cpu_count - 2; use 1 to force serial)")
-    parser.add_argument("--no-wandb", action="store_true",
-                        help="Disable W&B logging")
+                        help="Parallel workers (default: cpu_count - 2; use 1 for serial)")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     args = parser.parse_args()
 
-    if args.ensemble:
-        suppress_warnings()
-        out = Path("plots") / args.prefix / "counterfactual" / "ensemble"
-        out.mkdir(parents=True, exist_ok=True)
-        print("=" * 70)
-        print("COUNTERFACTUAL — ENSEMBLE (cross-seed, phase-resolved)")
-        print("=" * 70)
-        run_ensemble(args, out)
-        return
-
     suppress_warnings()
-    np.random.seed(args.seed)
+    out = Path("plots") / args.model / "counterfactual"
+    out.mkdir(parents=True, exist_ok=True)
 
-    metric_label = METRIC_LABELS[args.metric]
-
-    output_dir = Path("plots") / args.model / "counterfactual" / args.metric
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Initialize W&B
-    if not args.no_wandb:
-        wandb_config = WandbConfig()
-        run_name = datetime.now().strftime(r"counter %H:%M %d-%m-%y")
-        wandb.init(
-            project=wandb_config.project,
-            entity=wandb_config.entity,
-            name=run_name,
-            job_type="counterfactual-analysis",
-            group="analysis",
-            tags=["counterfactual", "analysis", "ablation", args.metric],
-            config={
-                "model": args.model,
-                "months": args.months,
-                "n_runs": args.n_runs,
-                "master_seed": args.seed,
-                "metric": args.metric,
-            },
-        )
-
+    print("=" * 70)
+    print("COUNTERFACTUAL — ENSEMBLE (cross-seed, phase-resolved)")
     print("=" * 70)
     start_time = time.time()
 
-    print(f"COUNTERFACTUAL TRAJECTORY ANALYSIS — {metric_label}")
-    print("=" * 70)
-
-    env_config = EnvConfig()
-    model, env, var_names = load_environment(args.model, env_config)
-    controllable_vars = var_names[1:]
-
-    # Step 1: Collect empirical mean actions
-    print("\nStep 1: Collecting empirical mean actions...")
-    mean_actions = collect_mean_actions(env, model, num_months=args.months,
-                                       n_trajectories=3, seed=args.seed)
-    print("  Mean action vector:")
-    for i, name in enumerate(controllable_vars):
-        print(f"    {name:<10}: {mean_actions[i]:+.4f}")
-
-    if wandb.run is not None:
-        wandb.log({f"mean_action/{name}": float(mean_actions[i]) for i, name in enumerate(controllable_vars)})
-
-    # Step 2: Run paired analysis (collects both metrics in one pass)
-    print(f"\nStep 2: Running paired analysis ({args.n_runs} runs × {1 + 2*9} conditions = {args.n_runs * 19} sims)...")
-    results = run_paired_analysis(
-        env, model, var_names,
-        num_months=args.months, n_runs=args.n_runs,
-        mean_actions=mean_actions, master_seed=args.seed
-    )
-
-    # Step 3: Statistical analysis
-    print(f"\nStep 3: Computing statistics for {metric_label}...")
-    stats = compute_statistics(results, metric=args.metric)
-
-    print(f"\n{'='*100}")
-    print(f"COUNTERFACTUAL ANALYSIS — {metric_label} (N={args.n_runs} paired runs)")
-    print(f"{'='*100}")
-    print(f"{'Feature':<10} | {'Clamp Δ':>10} {'±CI':>8} {'p':>8} {'Sig':>5} | {'Zero Δ':>10} {'±CI':>8} {'p':>8} {'Sig':>5}")
-    print("-" * 100)
-
-    for s in sorted(stats, key=lambda x: x['dr_mean_clamp']):
-        sig_c = "***" if s['p_clamp'] < 0.001 else "**" if s['p_clamp'] < 0.01 else "*" if s['p_clamp'] < 0.05 else "ns"
-        sig_z = "***" if s['p_zero'] < 0.001 else "**" if s['p_zero'] < 0.01 else "*" if s['p_zero'] < 0.05 else "ns"
-        print(f"{s['feature']:<10} | {s['dr_mean_clamp']:>+10.4f} {s['ci_clamp']:>8.4f} {s['p_clamp']:>8.4f} {sig_c:>5} | {s['dr_zero']:>+10.4f} {s['ci_zero']:>8.4f} {s['p_zero']:>8.4f} {sig_z:>5}")
-
-    # Log summary table to W&B
-    if wandb.run is not None:
-        summary_table = wandb.Table(
-            columns=["Feature", "Clamp Δ", "Clamp CI", "Clamp p-value", "Clamp Sig",
-                     "Zero Δ", "Zero CI", "Zero p-value", "Zero Sig"],
-            data=[
-                [
-                    s['feature'],
-                    s['dr_mean_clamp'], s['ci_clamp'], s['p_clamp'],
-                    "***" if s['p_clamp'] < 0.001 else "**" if s['p_clamp'] < 0.01 else "*" if s['p_clamp'] < 0.05 else "ns",
-                    s['dr_zero'], s['ci_zero'], s['p_zero'],
-                    "***" if s['p_zero'] < 0.001 else "**" if s['p_zero'] < 0.01 else "*" if s['p_zero'] < 0.05 else "ns",
-                ]
-                for s in sorted(stats, key=lambda x: abs(x['dr_mean_clamp']), reverse=True)
-            ]
-        )
-        wandb.log({f"counterfactual_summary_{args.metric}": summary_table})
-
-    # Agreement check
-    from scipy.stats import spearmanr
-    clamp_ranks = [s['dr_mean_clamp'] for s in stats]
-    zero_ranks = [s['dr_zero'] for s in stats]
-    rho, pval = spearmanr(clamp_ranks, zero_ranks)
-    print(f"\nRank correlation (Spearman) between methods: ρ = {rho:.3f}, p = {pval:.4f}")
-
-    if wandb.run is not None:
-        wandb.log({f"spearman_rho_{args.metric}": rho, f"spearman_p_{args.metric}": pval})
-
-    # Save
-    baseline_key, clamp_key, zero_key = METRIC_KEYS[args.metric]
-    np.savez(
-        output_dir / 'counterfactual_results.npz',
-        baseline=results[baseline_key],
-        mean_clamp=results[clamp_key],
-        zero_ablate=results[zero_key],
-        mean_actions=mean_actions,
-        controllable_vars=controllable_vars,
-        metric=args.metric,
-    )
-    print(f"\nResults saved to {output_dir / 'counterfactual_results.npz'}")
-
-    # Plot
-    print("\nGenerating plots...")
-    plot_comparison(stats, args.n_runs, output_dir, metric=args.metric)
-
-    if wandb.run is not None:
-        wandb.finish()
+    run_ensemble(args, out)
 
     elapsed = time.time() - start_time
     hours, remainder = divmod(int(elapsed), 3600)
     minutes, seconds = divmod(remainder, 60)
-
     print(f"\n{'='*70}")
     print(f"COUNTERFACTUAL ANALYSIS COMPLETE — Total time: {hours}h {minutes}m {seconds}s")
     print(f"{'='*70}")

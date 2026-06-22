@@ -16,7 +16,6 @@ import sys
 import time
 import argparse
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 from pathlib import Path
 from scipy import stats as sp_stats
@@ -257,98 +256,6 @@ def compute_statistics(values_per_run, feature_names):
     return stats
 
 
-def plot_obs_importance(stats, values_per_run, feature_names, n_runs, output_dir, title_prefix, filename_prefix):
-    """Generate observation importance bar chart with significance annotations."""
-
-    sorted_idx = np.argsort([s['mean'] for s in stats])[::-1]
-
-    sorted_names = [stats[i]['feature'] for i in sorted_idx]
-    sorted_means = [stats[i]['mean'] for i in sorted_idx]
-    sorted_cis = [stats[i]['ci_95'] for i in sorted_idx]
-    sorted_pvals = [stats[i]['p_value'] for i in sorted_idx]
-
-    colors = ['#D32F2F' if s['p_value'] < 0.05 else '#999999' for s in [stats[i] for i in sorted_idx]]
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-    bars = ax.bar(sorted_names, sorted_means, color=colors, edgecolor='black',
-                  linewidth=1.2, yerr=sorted_cis, capsize=6,
-                  error_kw={'linewidth': 1.5, 'capthick': 1.5})
-
-    for i, (mean_val, ci_val, p_val) in enumerate(zip(sorted_means, sorted_cis, sorted_pvals)):
-        star = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
-        y_pos = mean_val + ci_val + max(sorted_means) * 0.02
-        ax.text(i, y_pos, star, ha='center', va='bottom', fontsize=11, fontweight='bold')
-
-    ax.set_xlabel('Observation Variable', fontsize=13)
-    ax.set_ylabel(f'Mean Importance ± 95% CI (N={n_runs})', fontsize=13)
-    ax.set_title(f'{title_prefix}: Observation Importance', fontsize=15)
-    ax.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
-    ax.grid(axis='y', alpha=0.3)
-
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='#D32F2F', edgecolor='black', label='Significant (p<0.05)'),
-        Patch(facecolor='#999999', edgecolor='black', label='Not significant (p≥0.05)'),
-    ]
-    ax.legend(handles=legend_elements, fontsize=11)
-    fig.tight_layout()
-    fig.savefig(output_dir / f'{filename_prefix}_importance.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / f'{filename_prefix}_importance.png'}")
-
-    # Boxplot
-    fig2, ax2 = plt.subplots(figsize=(14, 7))
-    bp = ax2.boxplot(
-        [values_per_run[:, i] for i in sorted_idx],
-        labels=sorted_names, patch_artist=True, vert=True
-    )
-    for patch, color in zip(bp['boxes'], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-
-    ax2.set_xlabel('Observation Variable', fontsize=13)
-    ax2.set_ylabel(f'Importance (N={n_runs} independent runs)', fontsize=13)
-    ax2.set_title(f'{title_prefix}: Distribution Across Runs', fontsize=15)
-    ax2.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=11)
-    ax2.grid(axis='y', alpha=0.3)
-    fig2.tight_layout()
-    fig2.savefig(output_dir / f'{filename_prefix}_dist.png', dpi=150, bbox_inches='tight')
-    plt.close(fig2)
-    print(f"  Saved {output_dir / f'{filename_prefix}_dist.png'}")
-
-
-def plot_ig_heatmap(mean_ig_matrix, var_names, output_dir):
-    """Plot the mean IG heatmap (averaged across all runs)."""
-    action_names = var_names[1:]
-    obs_names = var_names + ['Month']
-
-    fig, ax = plt.subplots(figsize=(14, 8))
-    im = ax.imshow(mean_ig_matrix[:, :len(obs_names)], cmap='YlOrRd', aspect='auto')
-
-    ax.set_xticks(range(len(obs_names)))
-    ax.set_xticklabels(obs_names, rotation=45, ha='right', fontsize=11)
-    ax.set_yticks(range(len(action_names)))
-    ax.set_yticklabels(action_names, fontsize=11)
-
-    ax.set_xlabel('Observation Variable', fontsize=13)
-    ax.set_ylabel('Action Output', fontsize=13)
-    ax.set_title('Integrated Gradients: |IG(aⱼ, oᵢ)| (Mean over all runs)', fontsize=15)
-
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Mean |IG|', fontsize=12)
-
-    for i in range(mean_ig_matrix.shape[0]):
-        for j in range(min(mean_ig_matrix.shape[1], len(obs_names))):
-            val = mean_ig_matrix[i, j]
-            color = 'white' if val > mean_ig_matrix.max() * 0.6 else 'black'
-            ax.text(j, i, f'{val:.4f}', ha='center', va='center', fontsize=8, color=color)
-
-    fig.tight_layout()
-    fig.savefig(output_dir / 'ig_policy_heatmap.png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved {output_dir / 'ig_policy_heatmap.png'}")
-
-
 def print_statistics_table(stats, title, n_runs):
     """Print a formatted statistics table."""
     print(f"\n{'='*100}")
@@ -462,18 +369,6 @@ def main():
         baseline_type=args.baseline,
     )
     print(f"\nResults saved to {output_dir / 'ig_results.npz'}")
-
-    # Plots
-    print("\nGenerating plots...")
-    plot_obs_importance(
-        policy_stats, policy_importance_per_run, obs_names, args.n_runs,
-        output_dir, "IG Policy Attribution (Σ |IG|)", "ig_policy_obs"
-    )
-    plot_obs_importance(
-        value_stats, value_importance_per_run, obs_names, args.n_runs,
-        output_dir, "IG Value Attribution (|IG(V)|)", "ig_value_obs"
-    )
-    plot_ig_heatmap(mean_ig_matrix_all, var_names, output_dir)
 
     elapsed = time.time() - start_time
     hours, remainder = divmod(int(elapsed), 3600)

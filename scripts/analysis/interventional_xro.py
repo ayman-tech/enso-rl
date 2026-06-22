@@ -31,9 +31,6 @@ import argparse
 import multiprocessing as mp
 from multiprocessing import cpu_count
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats as sp_stats
 
@@ -42,6 +39,7 @@ sys.path.insert(0, str(repo_root))
 
 from config import EnvConfig
 from utils import suppress_warnings
+from utils.results_io import save_csv
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
@@ -229,33 +227,6 @@ def _print_table(rows, n_runs):
               f"{r['mean']:>+10.4f} {r['ci']:>9.4f} {r['p']:>9.4f} {sig:>5}")
 
 
-def _plot(rows, output_dir, mode, direction):
-    """Bar chart of ΔP(MYE) per target for the 'total' phase, one panel per sign."""
-    signs = sorted({r['sign'] for r in rows})
-    targets = list(dict.fromkeys(r['target'] for r in rows))
-    fig, axes = plt.subplots(1, len(signs), figsize=(8 * len(signs), 6), squeeze=False)
-    for k, sgn in enumerate(signs):
-        ax = axes[0][k]
-        sub = [r for r in rows if r['sign'] == sgn and r['phase'] == 'total']
-        sub = sorted(sub, key=lambda r: r['mean'])
-        names = [r['target'] for r in sub]
-        vals = [r['mean'] for r in sub]
-        cis = [r['ci'] for r in sub]
-        colors = ['#D32F2F' if r['p'] < 0.05 and r['mean'] > 0
-                  else '#1976D2' if r['p'] < 0.05 else '#999999' for r in sub]
-        ax.barh(names, vals, xerr=cis, color=colors, edgecolor='black', capsize=4)
-        ax.axvline(0, color='gray', ls='--', lw=0.8)
-        ax.set_xlabel('ΔP(MYE), total')
-        ax.set_title(f'{mode} {sgn} perturbation')
-        ax.grid(axis='x', alpha=0.3)
-    fig.suptitle(f'Agent-free interventional ΔP(MYE) — {mode}/{direction}', fontsize=14)
-    fig.tight_layout()
-    out = output_dir / f'interventional_xro_{mode}.png'
-    fig.savefig(out, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"\n  Saved {out}")
-
-
 def main():
     # Use 'spawn' to avoid fork-related issues (matches the other analyses).
     mp.set_start_method('spawn', force=True)
@@ -270,16 +241,15 @@ def main():
     parser.add_argument("--master-seed", type=int, default=42)
     parser.add_argument("--groups-only", action="store_true",
                         help="Only run the mode groups, skip singles")
-    parser.add_argument("--prefix", type=str, default="rl_model",
-                        help="Namespace label (match the ensemble prefix so the "
-                             "convergence figure finds this output)")
+    parser.add_argument("--model", type=str, default="ensemble",
+                        help="Namespace label (match the ensemble prefix)")
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel workers across (target,sign) tasks "
                              "(default: cpu_count - 2; 1 = serial)")
     args = parser.parse_args()
 
     suppress_warnings()
-    output_dir = Path("plots") / args.prefix / "interventional_xro"
+    output_dir = Path("plots") / args.model / "interventional_xro"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
@@ -309,7 +279,6 @@ def main():
                                args.magnitude, args.mode, args.direction,
                                state_std, args.master_seed, n_workers=n_workers)
     _print_table(rows, args.n_runs)
-    _plot(rows, output_dir, args.mode, args.direction)
 
     # Save flat arrays for the convergence figure (Part D)
     np.savez(
@@ -324,6 +293,11 @@ def main():
         n_runs=args.n_runs, months=args.months, seeds=np.array(seeds),
     )
     print(f"  Saved {output_dir / 'interventional_xro.npz'}")
+
+    # Tidy CSV alongside the npz (rows are already per target/sign/phase).
+    csv_rows = [{'target': r['target'], 'sign': r['sign'], 'phase': r['phase'],
+                 'mean_dP_MYE': r['mean'], 'ci95': r['ci'], 'p': r['p']} for r in rows]
+    save_csv(output_dir / 'interventional_xro.csv', csv_rows)
 
     el = time.time() - start
     print(f"\n{'='*70}\nINTERVENTIONAL ANALYSIS COMPLETE — {int(el//60)}m {int(el%60)}s\n{'='*70}")

@@ -73,6 +73,45 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
     return mye_fraction_by_phase(classified)
 
 
+def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration=12):
+    """Single rollout returning, per phase, the multi-year-ENSO time-fraction PLUS
+    the count and per-event durations (months) of multi-year events.
+
+    This disentangles the two ingredients of mye_prob (time-fraction ≈ event
+    frequency × mean duration): does the agent raise P(MYE) by making events
+    MORE FREQUENT or LONGER? A multi-year event is a continuous same-sign run of
+    |Nino3.4|>threshold lasting > min_duration months (matches classify_enso_event).
+
+    Returns dict phase -> {'frac', 'count', 'durations'(list of months)}.
+    """
+    from utils.enso_classifier import (classify_enso_event, mye_fraction_by_phase,
+                                        _find_continuous_runs)
+
+    obs, _ = env.reset(seed=seed)
+    enso_history = [obs[0]]
+    for _ in range(num_months):
+        if agent is not None:
+            action, _ = agent.predict(obs, deterministic=True)
+        else:
+            action = np.zeros(env.action_space.shape)
+        obs, _, _, _, _ = env.step(action)
+        enso_history.append(obs[0])
+
+    enso = np.asarray(enso_history)
+    thr = env.threshold
+    frac = mye_fraction_by_phase(classify_enso_event(enso, threshold=thr))
+
+    out = {}
+    binmap = {'el_nino': (enso >= thr).astype(int), 'la_nina': (enso <= -thr).astype(int)}
+    for ph, b in binmap.items():
+        durs = [length for _s, _e, length in _find_continuous_runs(b) if length > min_duration]
+        out[ph] = {'frac': frac[ph], 'count': len(durs), 'durations': durs}
+    out['total'] = {'frac': frac['total'],
+                    'count': out['el_nino']['count'] + out['la_nina']['count'],
+                    'durations': out['el_nino']['durations'] + out['la_nina']['durations']}
+    return out
+
+
 def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None,
                        debug_mode=False, seed=None):
     """
