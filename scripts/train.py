@@ -31,7 +31,7 @@ from utils.data_processing import (
     prepare_xro_parameters
 )
 from utils.evaluation import evaluate_agent
-from callbacks import WandbCallback, MYEEvalCallback
+from callbacks import WandbCallback, TrainingHistoryCallback
 from envs import XROMultiYearEnv
 from XRO.core import XRO
 
@@ -174,8 +174,9 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             # Evaluate roughly 20 times over the run (at least every 24k steps)
             eval_freq = max(train_config.n_steps,
                             min(24000, train_config.train_months // 20))
-            callbacks.append(MYEEvalCallback(
+            callbacks.append(TrainingHistoryCallback(
                 eval_env=eval_env,
+                model_name=wandb_config.name,
                 eval_freq=eval_freq,
                 eval_steps=train_config.sim_months,
                 verbose=1,

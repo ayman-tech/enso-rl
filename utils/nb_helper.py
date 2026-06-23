@@ -7,6 +7,8 @@ Imported by both:
 
 Keeping these here avoids duplicating the setup logic across the two notebooks.
 """
+import warnings
+
 import numpy as np
 from scipy.stats import t as t_dist
 
@@ -56,3 +58,33 @@ def _mean_ci(arr):
 def _load_npz(path):
     """Load npz and return as a dict-like NpzFile (supports 'key in d.files')."""
     return np.load(path, allow_pickle=True)
+
+
+def _median_iqr(arr, axis=0):
+    """Median and the 25th/75th percentiles along `axis` (the IQR band).
+
+    Used for ensemble learning curves: median across seeds with a shaded 25-75%
+    band. Robust to the non-normal, outlier-prone spread of RL runs across seeds,
+    per rliable's recommendation. NaNs (e.g. the first PPO update before the logger
+    is populated) are ignored.
+    """
+    arr = np.asarray(arr, float)
+    with warnings.catch_warnings():  # all-NaN column (metric absent in a run) -> NaN
+        warnings.simplefilter("ignore", RuntimeWarning)
+        median = np.nanmedian(arr, axis=axis)
+        q25, q75 = np.nanpercentile(arr, [25, 75], axis=axis)
+    return median, q25, q75
+
+
+def _bootstrap_ci(values, statistic=np.mean, n=10000, ci=95, seed=0):
+    """Bootstrap point estimate and a two-sided CI for `statistic` over `values`.
+
+    Resamples `values` with replacement `n` times. Used for the headline final-lift
+    number (stratified across the seed ensemble). Returns (point, lo, hi).
+    """
+    values = np.asarray(values, float)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(values), size=(n, len(values)))
+    boot = statistic(values[idx], axis=1)
+    lo, hi = np.percentile(boot, [(100 - ci) / 2, 100 - (100 - ci) / 2])
+    return float(statistic(values)), float(lo), float(hi)
