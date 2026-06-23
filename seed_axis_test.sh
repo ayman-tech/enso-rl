@@ -35,8 +35,8 @@ cd "$(dirname "$0")"
 # ---- configuration (override via environment) -------------------------------
 EPOCHS="${EPOCHS:-1000}"          # training epochs per run
 PIN="${PIN:-0}"                   # value the four fixed axes are held at
-SWEEP="${SWEEP:-1 2 3 4 5}"       # values the target axis is swept over
-PREFIX="${PREFIX:-sens}"          # model-name prefix
+SWEEP="${SWEEP:-1 2 3 4 5 6 7 8 9 10}"       # values the target axis is swept over
+PREFIX="${PREFIX:-rng}"          # model-name prefix
 AXES="${AXES:-weight action batch init physics}"
 JOBS="${JOBS:-${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}}"
 LOGDIR="${LOGDIR:-logs/sweep}"
