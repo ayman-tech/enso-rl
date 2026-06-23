@@ -1,10 +1,18 @@
-.PHONY: train evaluate shapley counterfactual ensemble shapley-single counterfactual-single shapley-robust counterfactual-robust interventional interventional-robust inference inference-robust precursor precursor-robust policy-facing policy-facing-robust results-quick results-robust traj-ensemble
+# Main runs
+.PHONY: train train-ensemble inference inference-robust shapley counterfactual shapley-robust counterfactual-robust
+# other runs
+.PHONY : precursor precursor-robust interventional interventional-robust
+# Pipelines
+.PHONY : xai-quick xai-robust train-quick train-robust full-quick full-robust 
+
+# Archived
+.PHONY : traj-ensemble policy-facing policy-facing-robust shapley-single counterfactual-single
 
 name ?= model
 
 train:
 	uv run scripts/train.py --epochs 1000 --name $(name)
-ensemble:
+train-ensemble:
 	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 1000 --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
@@ -40,21 +48,31 @@ precursor-robust:
 	uv run scripts/analysis/precursor_composite.py --prefix $(name) --n-runs 100 --months 2400 --lead 24
 
 # Aggregate result pipelines (run on an already-trained ensemble: name=<prefix>)
-results-quick:
-	$(MAKE) inference name=$(name)
+
+xai-quick:
 	$(MAKE) counterfactual name=$(name)
 	$(MAKE) shapley name=$(name)
 	$(MAKE) interventional name=$(name)
-results-robust:
-	$(MAKE) inference-robust name=$(name)
+xai-robust:
 	$(MAKE) counterfactual-robust name=$(name)
 	$(MAKE) shapley-robust name=$(name)
 	$(MAKE) interventional-robust name=$(name)
 
+train-quick:
+	$(MAKE) train-ensemble name=$(name)
+	$(MAKE) inference name=$(name)
+
+train-robust:
+	$(MAKE) train-ensemble name=$(name)
+	$(MAKE) inference-robust name=$(name)
 
 full-quick:
-	$(MAKE) ensemble name=$(name)
-	$(MAKE) results-quick name=$(name)
+	$(MAKE) train-quick name=$(name)
+	$(MAKE) xai-quick name=$(name)
+
+full-robust:
+	$(MAKE) train-robust name=$(name)
+	$(MAKE) xai-robust name=$(name)
 
 
 # ============================== ARCHIVED ================================
