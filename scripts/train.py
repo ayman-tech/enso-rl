@@ -101,6 +101,7 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
         "enso_threshold": env_config.threshold,
         "debug_mode": train_config.debug_mode,
         "learning_rate": train_config.learning_rate,
+        "gamma": train_config.gamma,
         "n_steps": train_config.n_steps,
     }
     if seeds is not None:
@@ -139,6 +140,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
     print("="*70)
     print(f"Total timesteps: {round(train_config.train_months/12):,} yrs or {train_config.train_months:,} months")
     print(f"Learning rate: {train_config.learning_rate}")
+    print(f"Discount factor (gamma): {train_config.gamma}")
     print(f"Update frequency (n_steps): {train_config.n_steps}")
 
     # Capture verbose output
@@ -154,7 +156,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             env=env,
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
-            gamma=0.99,
+            gamma=train_config.gamma,
             seed=seeds.weight,
             verbose=1
         )
@@ -174,9 +176,21 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             # Evaluate roughly 20 times over the run (at least every 24k steps)
             eval_freq = max(train_config.n_steps,
                             min(24000, train_config.train_months // 20))
+            name = wandb_config.name
+            master = seeds.weight
+            suffix = f"_seed{master}" if master is not None else None
+            if (not seeds.has_override and suffix
+                    and name.endswith(suffix) and len(name) > len(suffix)):
+                out_dir = Path("plots") / name[:-len(suffix)]
+                run_stem = f"train_seed{master}"
+            else:
+                out_dir = Path("plots") / name
+                run_stem = "training"
             callbacks.append(TrainingHistoryCallback(
                 eval_env=eval_env,
-                model_name=wandb_config.name,
+                out_dir=out_dir,
+                run_stem=run_stem,
+                model_name=name,
                 eval_freq=eval_freq,
                 eval_steps=train_config.sim_months,
                 verbose=1,

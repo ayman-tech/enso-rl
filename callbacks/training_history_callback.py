@@ -5,8 +5,10 @@ During training PPO only exposes the shaped reward, while the quantity we report
 is the multi-year-ENSO probability (`mye_prob`). This callback owns ALL on-disk
 training history so that ensemble convergence/reproducibility figures can be made
 offline (W&B cannot overlay many seeds as one median + band). It records two
-streams, each on its natural cadence, into a single per-seed file
-`plots/<model_name>/training.npz` (+ a tidy `training.csv` sidecar):
+streams, each on its natural cadence, into one per-seed file pair
+`<out_dir>/<run_stem>.npz` (+ a tidy `<run_stem>.csv` sidecar). For an ensemble
+member this is `plots/<prefix>/train_seed<N>.npz`, co-located with that prefix's
+`inference.npz` (one folder per model, not one per seed):
 
   * dense optimization diagnostics, one row per PPO update (`_on_rollout_end`):
     smoothed episode reward/length plus the SB3 logger metrics (explained
@@ -16,7 +18,7 @@ streams, each on its natural cadence, into a single per-seed file
     the lift over it.
 
 The offline aggregator is `notebooks/train_analysis.ipynb`, which globs
-`plots/<prefix>_seed*/training.npz` and plots median + IQR bands across seeds.
+`plots/<prefix>/train_seed*.npz` and plots median + IQR bands across seeds.
 """
 import sys
 import time
@@ -45,14 +47,17 @@ _DIAG_KEYS = {
 
 
 class TrainingHistoryCallback(BaseCallback):
-    """Record per-seed training history to `plots/<model_name>/training.{npz,csv}`.
+    """Record per-seed training history to `<out_dir>/<run_stem>.{npz,csv}`.
 
     Args:
         eval_env: A SEPARATE environment instance (not the training env).
             `evaluate_agent` calls `reset()`, which would corrupt the in-progress
             PPO rollout if the training env were reused.
-        model_name (str): On-disk run identifier (the train.py `save_name`); output
-            goes to `plots/<model_name>/`.
+        out_dir (str | Path): Directory to write into (created if needed). For an
+            ensemble member this is `plots/<prefix>/`, shared with `inference.npz`.
+        run_stem (str): Filename stem, e.g. `train_seed3` -> `train_seed3.npz`.
+        model_name (str): On-disk run identifier (the train.py `save_name`), stored
+            in the npz for provenance.
         eval_freq (int): Evaluate `mye_prob` every this many timesteps.
         eval_steps (int): Months per evaluation rollout. Longer = lower-variance
             `mye_prob`, but multi-year events are rare so keep it reasonably long.
@@ -64,8 +69,8 @@ class TrainingHistoryCallback(BaseCallback):
         verbose (int): Verbosity.
     """
 
-    def __init__(self, eval_env, model_name, eval_freq=24000, eval_steps=1200,
-                 n_episodes=3, log_baseline=True, verbose=1):
+    def __init__(self, eval_env, out_dir, run_stem, model_name, eval_freq=24000,
+                 eval_steps=1200, n_episodes=3, log_baseline=True, verbose=1):
         super().__init__(verbose)
         self.eval_env = eval_env
         self.eval_freq = eval_freq
@@ -75,8 +80,9 @@ class TrainingHistoryCallback(BaseCallback):
         self._next_eval = eval_freq
         self._baseline_mye = None  # cached: baseline is policy-independent
 
-        self.out_dir = Path("plots") / model_name
+        self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.run_stem = run_stem
         self.model_name = model_name
         self._train_rows = []  # one dict per PPO update
         self._eval_rows = []   # one dict per evaluation
@@ -216,7 +222,7 @@ class TrainingHistoryCallback(BaseCallback):
             npz["eval_" + col] = np.array(
                 [r.get(col, np.nan) for r in self._eval_rows], dtype=float)
 
-        np.savez(self.out_dir / "training.npz", **npz)
+        np.savez(self.out_dir / f"{self.run_stem}.npz", **npz)
 
         # Tidy/long CSV sidecar: one (split, timestep, metric, value) row each.
         rows = []
@@ -228,5 +234,5 @@ class TrainingHistoryCallback(BaseCallback):
             for col in eval_cols:
                 rows.append({"split": "eval", "timestep": r["timestep"],
                              "metric": col, "value": r.get(col, np.nan)})
-        save_csv(self.out_dir / "training.csv", rows,
+        save_csv(self.out_dir / f"{self.run_stem}.csv", rows,
                  fieldnames=["split", "timestep", "metric", "value"])
