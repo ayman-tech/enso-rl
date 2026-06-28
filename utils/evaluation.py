@@ -193,6 +193,10 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         'states_traj': np.array(states_history),
         'classified_event': classified_event,  # Summary string
         'classified_event_array': classified_event_array,  # Detailed month-by-month
+        # 0-based calendar month of step 0 (env.month_offset = sampled start month - 1).
+        # Needed to bin actions/states by TRUE calendar month, since reset() starts the
+        # seasonal clock at the sampled state's month, not January.
+        'month_offset': int(getattr(env, 'month_offset', 0)),
         'avg_reward': avg_reward,
         'mye_probability': mye_prob,  # Percentage of months in multi-year events
         'mye_months': mye_months,  # Actual count of multi-year months

@@ -3,7 +3,7 @@
 name ?= model
 
 train:
-	uv run scripts/train.py --epochs 2000 --name $(name)
+	uv run scripts/train.py --epochs 1000 --name $(name)
 ensemble:
 	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 1000 --no-wandb
 

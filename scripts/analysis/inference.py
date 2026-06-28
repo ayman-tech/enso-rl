@@ -13,6 +13,10 @@ npz arrays:
   action_names        [9]                       forcing mode names (var_names[1:])
   seeds               [n_seeds]                 model seed indices used
   rollout_seeds       [n_seeds, n_rollouts]      RNG seed for each rollout pair
+  rollout_start_month [n_seeds, n_rollouts]      0-based calendar month of step 0
+                                                 (reset() starts the seasonal clock at the
+                                                 sampled state's month; needed to bin by
+                                                 TRUE calendar month = (step+start)%12)
   n_rollouts          scalar
   months              scalar                    T (steps per rollout)
   spinup              scalar (=12)              months to skip for seasonality binning
@@ -64,7 +68,9 @@ from utils.evaluation import simulate_trajectory
 from utils import suppress_warnings
 from config import EnvConfig
 
-SPINUP = 12  # fixed by XRO env: seasonal clock resets to Jan on every env.reset()
+SPINUP = 12  # months to skip as transient at the start of each rollout. NOTE: reset()
+             # starts the seasonal clock at the sampled state's calendar month (not Jan),
+             # so bin by TRUE calendar month via rollout_start_month, not step % 12.
 
 # String labels produced by classify_enso_event → int8 encoding
 _LABEL_MAP = {
@@ -136,6 +142,7 @@ def _worker_seed(wargs):
     a_mye = np.zeros((n_r, T),     dtype=np.int8)
     b_obs = np.zeros((n_r, T, 10), dtype=np.float32)
     b_mye = np.zeros((n_r, T),     dtype=np.int8)
+    a_start = np.zeros(n_r,        dtype=np.int8)  # 0-based calendar month of step 0
 
     for ri, rs in enumerate(r_seeds):
         sim_a = simulate_trajectory(env, agent=model, num_months=T, seed=rs)
@@ -145,11 +152,13 @@ def _worker_seed(wargs):
         a_mye[ri] = _encode_classified(sim_a['classified_event_array'])
         b_obs[ri] = sim_b['states_traj'][1:].astype(np.float32)
         b_mye[ri] = _encode_classified(sim_b['classified_event_array'])
+        # agent & baseline share the same seed -> same start month; record once.
+        a_start[ri] = sim_a['month_offset']
 
     af = (a_mye >= 3).mean() * 100
     bf = (b_mye >= 3).mean() * 100
     print(f"  [seed {seed}] done — agent={af:.1f}%  base={bf:.1f}%  lift={af-bf:+.1f}%", flush=True)
-    return si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye
+    return si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye, a_start
 
 
 def main():
@@ -204,14 +213,17 @@ def main():
     base_obs        = np.zeros((n_seeds, n_r, T, 10), dtype=np.float32)
     base_mye_label  = np.zeros((n_seeds, n_r, T),     dtype=np.int8)
     rollout_seeds   = np.zeros((n_seeds, n_r),         dtype=np.int64)
+    rollout_start_month = np.zeros((n_seeds, n_r),     dtype=np.int8)  # 0-based calendar month of step 0
 
-    # Precompute each seed's rollout seeds in the parent (master_rng advances once
-    # per seed, in seed order) so the work is reproducible and order-independent —
-    # this makes the per-seed rollouts safe to run in parallel processes.
+    # Common random numbers ACROSS trained seeds: derive ONE set of rollout seeds
+    # from the master RNG and score every model on it. Because each model sees the
+    # identical eval draws, differencing across models cancels evaluation-draw noise,
+    # so the across-seed spread reflects only the trained weights — not which eval
+    # conditions a given model happened to be tested on. (Depends only on
+    # --master-seed, so it stays reproducible and order-independent for parallelism.)
+    r_seeds = [int(master_rng.integers(0, 2**31)) for _ in range(n_r)]
     worker_args = []
     for si, seed in enumerate(valid_seeds):
-        seed_rng = np.random.default_rng(master_rng.integers(0, 2**31))
-        r_seeds = [int(seed_rng.integers(0, 2**31)) for _ in range(n_r)]
         rollout_seeds[si] = r_seeds
         worker_args.append((si, seed, f"{args.model}_seed{seed}", r_seeds, T, env_config))
 
@@ -228,7 +240,7 @@ def main():
 
     # Assemble per-seed results into the pre-allocated arrays (by seed index).
     var_names = None
-    for si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye in results:
+    for si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye, a_start in results:
         if var_names is None:
             var_names = vnames
         agent_obs[si]       = a_obs
@@ -236,6 +248,7 @@ def main():
         agent_mye_label[si] = a_mye
         base_obs[si]        = b_obs
         base_mye_label[si]  = b_mye
+        rollout_start_month[si] = a_start
 
     _print_summary(valid_seeds, agent_mye_label, base_mye_label)
 
@@ -245,6 +258,7 @@ def main():
         action_names=np.array(list(var_names[1:])),
         seeds=np.array(valid_seeds),
         rollout_seeds=rollout_seeds,
+        rollout_start_month=rollout_start_month,
         n_rollouts=n_r,
         months=T,
         spinup=SPINUP,
