@@ -79,7 +79,7 @@ class XROMultiYearEnv(gym.Env):
 
         # Reward weights (defaults mirror EnvConfig.reward_config)
         reward_config = params.get('reward_config', {})
-        self.action_penalty_weight = reward_config.get('action_penalty_weight', 0.002)
+        self.action_penalty_weight = reward_config.get('action_penalty_weight', 0.02)
         self.realism_penalty_weight = reward_config.get('realism_penalty_weight', 0.05)
         realism_quantile = reward_config.get('realism_quantile', 0.95)
         # Phase-specific duration ceilings + ramp (discourage unrealistic persistence)

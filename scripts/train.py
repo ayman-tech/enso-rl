@@ -31,7 +31,7 @@ from utils.data_processing import (
     prepare_xro_parameters
 )
 from utils.evaluation import evaluate_agent
-from callbacks import WandbCallback, MYEEvalCallback
+from callbacks import WandbCallback, TrainingHistoryCallback
 from envs import XROMultiYearEnv
 from XRO.core import XRO
 
@@ -101,6 +101,7 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
         "enso_threshold": env_config.threshold,
         "debug_mode": train_config.debug_mode,
         "learning_rate": train_config.learning_rate,
+        "gamma": train_config.gamma,
         "n_steps": train_config.n_steps,
     }
     if seeds is not None:
@@ -139,6 +140,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
     print("="*70)
     print(f"Total timesteps: {round(train_config.train_months/12):,} yrs or {train_config.train_months:,} months")
     print(f"Learning rate: {train_config.learning_rate}")
+    print(f"Discount factor (gamma): {train_config.gamma}")
     print(f"Update frequency (n_steps): {train_config.n_steps}")
 
     # Capture verbose output
@@ -154,7 +156,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             env=env,
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
-            gamma=0.99,
+            gamma=train_config.gamma,
             seed=seeds.weight,
             verbose=1
         )
@@ -174,8 +176,25 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             # Evaluate roughly 20 times over the run (at least every 24k steps)
             eval_freq = max(train_config.n_steps,
                             min(24000, train_config.train_months // 20))
-            callbacks.append(MYEEvalCallback(
+            # Co-locate training history with the run-group's inference.npz under
+            # plots/<group>/, as train_seed<...>.{npz,csv} (one folder per group, not
+            # one per seed).
+            name = wandb_config.name
+            if seeds.has_override:
+                suffix = "_seed" + "-".join(str(s) for s in seeds.as_tuple())
+            else:
+                suffix = f"_seed{seeds.weight}" if seeds.weight is not None else None
+            if suffix and name.endswith(suffix) and len(name) > len(suffix):
+                out_dir = Path("plots") / name[:-len(suffix)]
+                run_stem = "train" + suffix
+            else:
+                out_dir = Path("plots") / name
+                run_stem = "training"
+            callbacks.append(TrainingHistoryCallback(
                 eval_env=eval_env,
+                out_dir=out_dir,
+                run_stem=run_stem,
+                model_name=name,
                 eval_freq=eval_freq,
                 eval_steps=train_config.sim_months,
                 verbose=1,

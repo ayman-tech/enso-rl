@@ -2,6 +2,6 @@
 Callbacks module for training.
 """
 from .wandb_callback import WandbCallback
-from .mye_eval_callback import MYEEvalCallback
+from .training_history_callback import TrainingHistoryCallback
 
-__all__ = ["WandbCallback", "MYEEvalCallback"]
+__all__ = ["WandbCallback", "TrainingHistoryCallback"]

@@ -16,6 +16,9 @@ class TrainConfig:
     # Learning rate
     learning_rate: float = 0.0003
 
+    # Discount factor. ~100-month effective horizon at 0.99; 0.95 => ~20-month horizon
+    gamma: float = 0.95
+
     # Random seed for PPO (reproducibility / multi-seed ensembles). None = unseeded.
     seed: int = None
     
