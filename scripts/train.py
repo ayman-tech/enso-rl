@@ -176,13 +176,17 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             # Evaluate roughly 20 times over the run (at least every 24k steps)
             eval_freq = max(train_config.n_steps,
                             min(24000, train_config.train_months // 20))
+            # Co-locate training history with the run-group's inference.npz under
+            # plots/<group>/, as train_seed<...>.{npz,csv} (one folder per group, not
+            # one per seed).
             name = wandb_config.name
-            master = seeds.weight
-            suffix = f"_seed{master}" if master is not None else None
-            if (not seeds.has_override and suffix
-                    and name.endswith(suffix) and len(name) > len(suffix)):
+            if seeds.has_override:
+                suffix = "_seed" + "-".join(str(s) for s in seeds.as_tuple())
+            else:
+                suffix = f"_seed{seeds.weight}" if seeds.weight is not None else None
+            if suffix and name.endswith(suffix) and len(name) > len(suffix):
                 out_dir = Path("plots") / name[:-len(suffix)]
-                run_stem = f"train_seed{master}"
+                run_stem = "train" + suffix
             else:
                 out_dir = Path("plots") / name
                 run_stem = "training"
