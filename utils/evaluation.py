@@ -21,7 +21,7 @@ def evaluate_agent(env, agent=None, continuous_steps=6000):
     
     enso_history = []
     obs, _ = env.reset()
-    enso_history.append(obs[0])
+    enso_history.append(env.state[0])
     
     for step in range(continuous_steps):
         if agent:
@@ -30,7 +30,7 @@ def evaluate_agent(env, agent=None, continuous_steps=6000):
             action = np.zeros(9)
         
         obs, reward, terminated, truncated, _ = env.step(action)
-        enso_history.append(obs[0])
+        enso_history.append(env.state[0])
     
     # Classify events and calculate multi-year probability
     classified = classify_enso_event(enso_history, threshold=env.threshold, min_duration=12)
@@ -60,14 +60,14 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
     from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 
     obs, _ = env.reset(seed=seed)
-    enso_history = [obs[0]]
+    enso_history = [env.state[0]]
     for _ in range(num_months):
         if agent is not None:
             action, _ = agent.predict(obs, deterministic=True)
         else:
             action = np.zeros(env.action_space.shape)
         obs, _, _, _, _ = env.step(action)
-        enso_history.append(obs[0])
+        enso_history.append(env.state[0])
 
     classified = classify_enso_event(enso_history, threshold=env.threshold)
     return mye_fraction_by_phase(classified)
@@ -88,14 +88,14 @@ def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration
                                         _find_continuous_runs)
 
     obs, _ = env.reset(seed=seed)
-    enso_history = [obs[0]]
+    enso_history = [env.state[0]]
     for _ in range(num_months):
         if agent is not None:
             action, _ = agent.predict(obs, deterministic=True)
         else:
             action = np.zeros(env.action_space.shape)
         obs, _, _, _, _ = env.step(action)
-        enso_history.append(obs[0])
+        enso_history.append(env.state[0])
 
     enso = np.asarray(enso_history)
     thr = env.threshold
@@ -141,11 +141,9 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     
     simulation_data = []
     obs, _ = env.reset(seed=seed)
-    sim_enso_history = [obs[0]]
+    sim_enso_history = [env.state[0]]
     actions_history = []
-    # Record only the raw modes; obs now also carries month + duration + phase
-    # features after the modes, so slice by n_modes rather than dropping a fixed tail.
-    states_history = [obs[:env.n_modes]]
+    states_history = [env.state.copy()]
     total_rewards = 0.0
     
     if debug_mode:
@@ -171,8 +169,8 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         
         obs, reward, terminated, truncated, _ = env.step(action)
         total_rewards += reward
-        sim_enso_history.append(obs[0])
-        states_history.append(obs[:env.n_modes])
+        sim_enso_history.append(env.state[0])
+        states_history.append(env.state.copy())
     
     end_time = time.perf_counter()
     elapsed = end_time - start_time

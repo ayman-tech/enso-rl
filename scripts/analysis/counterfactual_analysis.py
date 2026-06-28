@@ -127,7 +127,7 @@ def simulate_counterfactual(env, model, num_months, seed,
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
-    enso_history = [obs[0]]
+    enso_history = [env.state[0]]  # raw physical Nino3.4
 
     for step in range(num_months):
         action, _ = model.predict(obs, deterministic=True)
@@ -139,7 +139,7 @@ def simulate_counterfactual(env, model, num_months, seed,
 
         obs, reward, _, _, _ = env.step(action)
         total_reward += reward
-        enso_history.append(obs[0])
+        enso_history.append(env.state[0])
 
     classified = classify_enso_event(enso_history)
     phase = mye_fraction_by_phase(classified)

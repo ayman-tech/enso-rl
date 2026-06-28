@@ -126,14 +126,14 @@ def simulate_with_coalition(env, model, coalition_mask, num_months, seed, metric
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
-    enso_history = [float(obs[0])]
+    enso_history = [float(env.state[0])]
 
     for step in range(num_months):
         action, _ = model.predict(obs, deterministic=True)
         action = action * coalition_mask.astype(np.float32)
         obs, reward, terminated, truncated, _ = env.step(action)
         total_reward += reward
-        enso_history.append(float(obs[0]))
+        enso_history.append(float(env.state[0]))
 
     if metric == 'avg_reward':
         return total_reward / num_months

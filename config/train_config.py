@@ -19,6 +19,11 @@ class TrainConfig:
     # Discount factor. ~100-month effective horizon at 0.99; 0.95 => ~20-month horizon
     gamma: float = 0.95
 
+    # PPO value-function clipping range. Bounds how far the critic prediction can move
+    # per update (PPO2-style), this and VecNormalize(norm_reward=True) in train.py tame value_loss 
+    # blowup from the soft-constraint penalties. None disables it.
+    clip_range_vf: float = 0.2
+
     # Random seed for PPO (reproducibility / multi-seed ensembles). None = unseeded.
     seed: int = None
     

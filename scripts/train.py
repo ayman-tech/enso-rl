@@ -21,6 +21,7 @@ import torch as th
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Import configurations and utilities
 from config import TrainConfig, EnvConfig, WandbConfig
@@ -157,6 +158,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
             gamma=train_config.gamma,
+            clip_range_vf=train_config.clip_range_vf,
             seed=seeds.weight,
             verbose=1
         )
@@ -356,7 +358,7 @@ def main():
         # env-side randomness axes; reseed_on_reset=False so SB3's reset(seed=weight)
         # cannot couple them to the weight axis.
         print("\n4. Creating Gymnasium environment...")
-        env = XROMultiYearEnv(
+        raw_env = XROMultiYearEnv(
             params=params,
             train_ds=train_ds,
             var_names=var_names,
@@ -364,6 +366,15 @@ def main():
             seed_init=seeds.init,
             seed_physics=seeds.physics,
             reseed_on_reset=False,
+        )
+        # Critic-side stabilizer: normalize the *returns* (not obs - those are already
+        # z-scored in-env) by a running std so value targets stay O(1) despite the
+        # soft-constraint penalties. 
+        env = VecNormalize(
+            DummyVecEnv([lambda: raw_env]),
+            norm_obs=False,
+            norm_reward=True,
+            gamma=train_config.gamma,
         )
         print("\t[OK] Environment created")
 
@@ -381,8 +392,8 @@ def main():
         # Train
         model = train_ppo_agent(env, train_config, wandb_config, seeds, eval_env=eval_env)
         
-        # Evaluate
-        evaluate_trained_model(env, model)
+        # Evaluate on the unwrapped env (gym API + env.state/env.threshold)
+        evaluate_trained_model(raw_env, model)
         
         # Finish W&B run
         if wandb_config.mode != "disabled":

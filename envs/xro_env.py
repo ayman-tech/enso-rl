@@ -79,26 +79,31 @@ class XROMultiYearEnv(gym.Env):
 
         # Reward weights (defaults mirror EnvConfig.reward_config)
         reward_config = params.get('reward_config', {})
-        self.action_penalty_weight = reward_config.get('action_penalty_weight', 0.02)
+        self.action_penalty_weight = reward_config.get('action_penalty_weight', 0.002)
         self.realism_penalty_weight = reward_config.get('realism_penalty_weight', 0.05)
-        realism_quantile = reward_config.get('realism_quantile', 0.95)
         # Phase-specific duration ceilings + ramp (discourage unrealistic persistence)
         self.duration_ceiling_el_nino = reward_config.get('duration_ceiling_el_nino', 24)
         self.duration_ceiling_la_nina = reward_config.get('duration_ceiling_la_nina', 24)
         self.duration_penalty_rate = reward_config.get('duration_penalty_rate', 0.3)
+        # Saturation caps for the two soft-constraint penalties. See _calculate_reward / _realism_penalty for the tanh ramp.
+        self.duration_penalty_cap = reward_config.get('duration_penalty_cap', 5.0)
+        self.realism_penalty_cap = reward_config.get('realism_penalty_cap', 3.0)
         # Scale for the duration feature in the observation (months); ~1.0 at 2 years.
         self._duration_norm = 24.0
 
         # State-plausibility (Mahalanobis) reference from observed climatology.
         # Catches extreme/implausible single states; the duration ramp above
         # handles the temporal (over-persistence) failure mode it cannot see.
-        self._init_realism_reference(train_ds, var_names, realism_quantile)
+        self._init_realism_reference(train_ds, var_names)
 
-    def _init_realism_reference(self, train_ds, var_names, quantile):
-        """Precompute mean, inverse covariance, and chi-squared activation
-        threshold of the observed state distribution for the Mahalanobis penalty."""
-        from scipy.stats import chi2
+    def _init_realism_reference(self, train_ds, var_names):
+        """Precompute mean, inverse covariance, and the activation threshold of the
+        observed state distribution for the Mahalanobis penalty.
 
+        The threshold is anchored to the observed climatology's *empirical* envelope:
+        the largest squared Mahalanobis distance of any real observed state. The
+        penalty is therefore zero for any state as plausible as the real climate and
+        only fires on states more extreme than anything ever observed"""
         # Stack observed states into [n_time, n_modes] and drop incomplete rows
         obs_states = np.column_stack([
             np.asarray(train_ds[name].values, dtype=np.float64) for name in var_names
@@ -106,12 +111,20 @@ class XROMultiYearEnv(gym.Env):
         obs_states = obs_states[~np.isnan(obs_states).any(axis=1)]
 
         self._realism_mean = obs_states.mean(axis=0)
+        # Per-mode climatology mean/std for z-scoring the observation handed to the
+        # policy (see _get_obs). Reuse _realism_mean as the centering vector; the
+        # epsilon floor guards against any zero-variance mode.
+        self._state_mean = self._realism_mean
+        self._state_std = np.maximum(obs_states.std(axis=0), 1e-8)
         cov = np.cov(obs_states, rowvar=False)
         # Small ridge for numerical stability of the inverse
         cov += np.eye(cov.shape[0]) * 1e-6
         self._realism_inv_cov = np.linalg.inv(cov)
-        # Activation threshold: states beyond this chi-squared quantile are penalized
-        self._realism_threshold = float(chi2.ppf(quantile, df=len(var_names)))
+        # Activation threshold = max squared Mahalanobis distance over observed states
+        # (the empirical envelope). States beyond it are penalized.
+        delta = obs_states - self._realism_mean
+        d2_obs = np.einsum('ni,ij,nj->n', delta, self._realism_inv_cov, delta)
+        self._realism_threshold = float(d2_obs.max())
 
     def reset(self, seed=None):
         """Reset environment to initial state.
@@ -150,12 +163,20 @@ class XROMultiYearEnv(gym.Env):
         return self._get_obs(), {}
 
     def _get_obs(self):
-        """Get observation: state + seasonal-month feature + current ENSO-event
-        duration."""
+        """Get observation: z-scored state + seasonal-month feature + current
+        ENSO-event duration.
+
+        The 10 physical modes are standardized against the observed climatology so the
+        policy sees unit-scale inputs (raw WWV has ~10-25x the std of the other modes,
+        which otherwise dominates the network input). The raw physical state lives in
+        self.state and drives the reward; downstream analysis reads env.state, not this
+        observation. The appended month/duration features are already normalized.
+        """
         month_feature = ((self.current_step + self.month_offset) % 12) / 12.0
         duration_feature = self.consecutive_enso_months / self._duration_norm
+        norm_state = (self.state - self._state_mean) / self._state_std
         return np.concatenate(
-            [self.state, [month_feature, duration_feature]],
+            [norm_state, [month_feature, duration_feature]],
             dtype=np.float32,
         )
 
@@ -237,12 +258,16 @@ class XROMultiYearEnv(gym.Env):
             else:
                 duration_reward = 1.0     # multi-year event (>=13 months)
 
-            # Phase-specific over-persistence penalty
+            # Phase-specific over-persistence penalty. Saturating (tanh) ramp: slope
+            # ~= duration_penalty_rate near the ceiling , asymptoting at
+            # duration_penalty_cap. Keeps the deterrent monotonic while bounding the
+            # magnitude so a single far-tail event can't blow up value targets.
             ceiling = (self.duration_ceiling_el_nino if current_sign > 0
                        else self.duration_ceiling_la_nina)
             if self.consecutive_enso_months > ceiling:
                 over = self.consecutive_enso_months - ceiling
-                duration_penalty = -self.duration_penalty_rate * over
+                cap = self.duration_penalty_cap
+                duration_penalty = -cap * np.tanh(self.duration_penalty_rate * over / cap)
 
         # State-plausibility (Mahalanobis) penalty: discourage extreme/implausible
         # single states regardless of duration. Zero inside the observed envelope.
@@ -263,7 +288,11 @@ class XROMultiYearEnv(gym.Env):
         delta = self.state - self._realism_mean
         d2 = float(delta @ self._realism_inv_cov @ delta)
         excess = max(0.0, d2 - self._realism_threshold)
-        return -self.realism_penalty_weight * excess
+        # Saturating (tanh) ramp, mirroring the duration penalty: slope ~=
+        # realism_penalty_weight near the activation threshold, asymptoting at
+        # realism_penalty_cap so a single extreme state can't dominate value targets.
+        cap = self.realism_penalty_cap
+        return -cap * float(np.tanh(self.realism_penalty_weight * excess / cap))
 
     def _check_multi_year_event(self, history):
         """
