@@ -9,11 +9,14 @@
 .PHONY : traj-ensemble policy-facing policy-facing-robust shapley-single counterfactual-single
 
 name ?= model
+# Training duration (env steps; 1 step = 1 month). Overridable per-invocation, and
+# set per-pipeline by train-quick / train-robust below.
+total_timesteps ?= 240000
 
 train:
-	uv run scripts/train.py --epochs 1000 --name $(name)
+	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
 train-ensemble:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 1000 --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
@@ -58,12 +61,15 @@ xai-robust:
 	$(MAKE) shapley-robust name=$(name)
 	$(MAKE) interventional-robust name=$(name)
 
+# quick = shorter training for fast pipeline validation/iteration + light inference.
+# robust = longer training for convergence (publication model) + heavy inference.
+# 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) train-ensemble name=$(name)
+	$(MAKE) train-ensemble name=$(name) total_timesteps=120000
 	$(MAKE) inference name=$(name)
 
 train-robust:
-	$(MAKE) train-ensemble name=$(name)
+	$(MAKE) train-ensemble name=$(name) total_timesteps=600000
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:

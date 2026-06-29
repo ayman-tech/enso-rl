@@ -11,8 +11,8 @@ per-seed model name (models/<prefix>_seed<seed>.zip), so runs are fully
 independent and reproducible.
 
 Usage:
-    uv run scripts/train_ensemble.py --n-seeds 10 --epochs 1000 --no-wandb
-    uv run scripts/train_ensemble.py --seeds 0 1 2 3 4 --epochs 1000 --no-wandb
+    uv run scripts/train_ensemble.py --n-seeds 10 --total-timesteps 240000 --no-wandb
+    uv run scripts/train_ensemble.py --seeds 0 1 2 3 4 --total-timesteps 240000 --no-wandb
     uv run scripts/train_ensemble.py --n-seeds 10 --prefix ens --no-wandb
     uv run scripts/train_ensemble.py --n-seeds 10 --jobs 8 --no-wandb   # parallel
 """
@@ -32,7 +32,7 @@ def _build_cmd(seed, args, train_script):
     """Build the train.py command for one seed (identical to the serial invocation)."""
     name = f"{args.prefix}_seed{seed}"
     cmd = ["uv", "run", train_script,
-           "--epochs", str(args.epochs),
+           "--total-timesteps", str(args.total_timesteps),
            "--seed", str(seed),
            "--name", name]
     if args.lr is not None:
@@ -69,7 +69,8 @@ def main():
                         help="Number of seeds 0..n-1 (ignored if --seeds given)")
     parser.add_argument("--seeds", type=int, nargs="+", default=None,
                         help="Explicit list of seeds (overrides --n-seeds)")
-    parser.add_argument("--epochs", type=int, default=1000, help="Training epochs per agent")
+    parser.add_argument("--total-timesteps", type=int, default=240_000,
+                        help="Total training timesteps per agent")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate override")
     parser.add_argument("--prefix", type=str, default="ensemble_model",
                         help="Model name prefix; saved as models/<prefix>_seed<seed>")
@@ -95,7 +96,7 @@ def main():
 
     print("=" * 70)
     print(f"ENSEMBLE TRAINING — {len(seeds)} agents, seeds = {seeds}")
-    print(f"  epochs/agent = {args.epochs} | prefix = {args.prefix} | workers = {n_workers}")
+    print(f"  total_timesteps/agent = {args.total_timesteps} | prefix = {args.prefix} | workers = {n_workers}")
     print("=" * 70)
 
     start = time.time()

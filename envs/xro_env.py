@@ -126,7 +126,7 @@ class XROMultiYearEnv(gym.Env):
         d2_obs = np.einsum('ni,ij,nj->n', delta, self._realism_inv_cov, delta)
         self._realism_threshold = float(d2_obs.max())
 
-    def reset(self, seed=None):
+    def reset(self, seed=None, options=None):
         """Reset environment to initial state.
 
         When reseed_on_reset is True and an explicit seed is given, both the
@@ -197,15 +197,15 @@ class XROMultiYearEnv(gym.Env):
         self.enso_history.append(self.state[0])
         self.current_step += 1
         
-        # Check termination
-        terminated = False
-        if self.max_steps is not None and self.current_step >= self.max_steps:
-            terminated = True
-        
+        # Time-limit handling. ENSO control is a *continuing* task — there is no
+        # genuine terminal state — so episode-length resets are TRUNCATIONS, not
+        # terminations.
+        truncated = self.max_steps is not None and self.current_step >= self.max_steps
+
         # Calculate reward
         reward = self._calculate_reward(action)
-        
-        return self._get_obs(), reward, terminated, False, {}
+
+        return self._get_obs(), reward, False, truncated, {}
 
     def _calculate_reward(self, action):
         """

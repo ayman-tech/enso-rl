@@ -5,38 +5,47 @@ import numpy as np
 from config.env_config import EnvConfig
 
 
-def evaluate_agent(env, agent=None, continuous_steps=6000):
+def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False):
     """
     Evaluate agent performance over continuous steps.
-    
+
     Args:
         env: Gymnasium environment
         agent: Trained agent (if None, uses zero actions)
         continuous_steps (int): Number of steps to evaluate
-        
+        return_reward (bool): If True, also return the mean per-step RAW reward.
+            This env is unwrapped, so its reward is in true units — unlike the
+            VecNormalize-wrapped training env. Default False keeps the legacy
+            single-value return for existing callers.
+
     Returns:
-        float: Probability of multi-year events (percentage of months in 24+ month events)
+        float: Probability of multi-year events (percentage of months in 24+ month
+            events). If return_reward=True, returns (mye_probability, mean_reward).
     """
     from utils.enso_classifier import classify_enso_event
-    
+
     enso_history = []
     obs, _ = env.reset()
     enso_history.append(env.state[0])
-    
+    total_reward = 0.0
+
     for step in range(continuous_steps):
         if agent:
             action, _ = agent.predict(obs, deterministic=True)
         else:
             action = np.zeros(9)
-        
+
         obs, reward, terminated, truncated, _ = env.step(action)
+        total_reward += reward
         enso_history.append(env.state[0])
-    
+
     # Classify events and calculate multi-year probability
     classified = classify_enso_event(enso_history, threshold=env.threshold, min_duration=12)
     mye_months = np.sum((classified == 'Multi-year El Nino') | (classified == 'Multi-year La Nina'))
     mye_probability = mye_months / len(classified)
-    
+
+    if return_reward:
+        return mye_probability, total_reward / continuous_steps
     return mye_probability
 
 
