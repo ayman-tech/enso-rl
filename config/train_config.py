@@ -24,6 +24,14 @@ class TrainConfig:
     # Discount factor. ~100-month effective horizon at 0.99; 0.95 => ~20-month horizon
     gamma: float = 0.95
 
+    # Entropy bonus coeff. >0 keeps policy's action std from collapsing to near-deterministic
+    ent_coef: float = 0.005
+
+    # PPO within-update early stop: SB3 halts the epoch loop when approx_kl exceeds
+    # 1.5x this. Guards against the runaway KL/clip blowup once the policy sharpens.
+    # None disables it.
+    target_kl: float = 0.03
+
     # PPO value-function clipping range. Bounds how far the critic prediction can move
     # per update (PPO2-style), this and VecNormalize(norm_reward=True) in train.py tame value_loss 
     # blowup from the soft-constraint penalties. None disables it.

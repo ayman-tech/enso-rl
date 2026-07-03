@@ -20,6 +20,7 @@ member this is `plots/<prefix>/train_seed<N>.npz`, co-located with that prefix's
 The offline aggregator is `notebooks/train_analysis.ipynb`, which globs
 `plots/<prefix>/train_seed*.npz` and plots median + IQR bands across seeds.
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -70,7 +71,8 @@ class TrainingHistoryCallback(BaseCallback):
     """
 
     def __init__(self, eval_env, out_dir, run_stem, model_name, eval_freq=24000,
-                 eval_steps=1200, n_episodes=3, log_baseline=True, verbose=1):
+                 eval_steps=1200, n_episodes=3, log_baseline=True,
+                 best_model_path=None, verbose=1):
         super().__init__(verbose)
         self.eval_env = eval_env
         self.eval_freq = eval_freq
@@ -80,6 +82,9 @@ class TrainingHistoryCallback(BaseCallback):
         self._next_eval = eval_freq
         self._baseline_mye = None      # cached: baseline is policy-independent
         self._baseline_reward = None   # cached alongside _baseline_mye
+
+        self.best_model_path = best_model_path
+        self._best_metric = -np.inf
 
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -141,6 +146,10 @@ class TrainingHistoryCallback(BaseCallback):
 
         self._eval_rows.append(row)
 
+        # Best-model checkpoint
+        metric = row.get("mye_lift", mye_mean)
+        self._maybe_save_best(metric)
+
         if wandb.run is not None:
             wandb.log(log_dict)
 
@@ -155,6 +164,27 @@ class TrainingHistoryCallback(BaseCallback):
                         f"lift={mye_mean - self._baseline_mye:+.3f}")
             msg += f" | {time.time() - t0:.1f}s"
             print(msg, file=self._stdout, flush=True)
+
+    def _maybe_save_best(self, metric):
+        """Save the policy to best_model_path iff `metric` beats the running best.
+
+        Writes to a temp stem then atomically os.replace()s onto <path>.zip, so a run
+        killed mid-save cannot leave a truncated model. Overwrites in place — one file
+        per run, no step-numbered checkpoints.
+        """
+        if self.best_model_path is None or not np.isfinite(metric):
+            return
+        if metric <= self._best_metric:
+            return
+        self._best_metric = metric
+        # Pass an explicit .zip path: SB3 only auto-appends .zip when the path has no
+        # suffix, so a ".tmp" stem would be written without .zip and break the rename.
+        tmp_path = f"{self.best_model_path}.tmp.zip"
+        self.model.save(tmp_path)
+        os.replace(tmp_path, f"{self.best_model_path}.zip")
+        if self.verbose > 0:
+            print(f"[TrainHistory] new best metric={metric:+.3f} -> saved "
+                  f"{self.best_model_path}.zip", file=self._stdout, flush=True)
 
     # -------------------------------------------------------------- diagnostics ---
     def _on_rollout_end(self) -> None:

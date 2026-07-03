@@ -65,7 +65,7 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) train-ensemble name=$(name) total_timesteps=120000
+	$(MAKE) train-ensemble name=$(name) total_timesteps=240000
 	$(MAKE) inference name=$(name)
 
 train-robust:

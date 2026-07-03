@@ -7,6 +7,7 @@ Usage (normal and Full customizable run):
 """
 import sys
 import io
+import os
 import time
 import argparse
 import warnings
@@ -163,6 +164,8 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             n_epochs=train_config.n_epochs,
             gamma=train_config.gamma,
             clip_range_vf=train_config.clip_range_vf,
+            ent_coef=train_config.ent_coef,
+            target_kl=train_config.target_kl,
             seed=seeds.weight,
             verbose=1
         )
@@ -203,6 +206,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
                 model_name=name,
                 eval_freq=eval_freq,
                 eval_steps=train_config.eval_steps,
+                best_model_path=train_config.model_save_path,
                 verbose=1,
             ))
         model.learn(
@@ -217,10 +221,12 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
         # Parse metrics
         print("[OK] Training completed successfully!")
         
-        # Save model
-        model.save(train_config.model_save_path)
-        train_config.model_save_path = "models/"+wandb_config.name
-        print(f"[OK] Model saved to {train_config.model_save_path}.zip")
+        if eval_env is not None and os.path.exists(f"{train_config.model_save_path}.zip"):
+            model = PPO.load(train_config.model_save_path, env=env)
+            print(f"[OK] Loaded best checkpoint from {train_config.model_save_path}.zip")
+        else:
+            model.save(train_config.model_save_path)
+            print(f"[OK] Model saved to {train_config.model_save_path}.zip")
         
         # Log model as artifact (only if W&B is enabled)
         if wandb.run is not None:
