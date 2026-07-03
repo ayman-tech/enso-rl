@@ -11,7 +11,7 @@
 name ?= model
 # Training duration (env steps; 1 step = 1 month). Overridable per-invocation, and
 # set per-pipeline by train-quick / train-robust below.
-total_timesteps ?= 240000
+total_timesteps ?= 1200000
 
 train:
 	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
@@ -65,7 +65,7 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) train-ensemble name=$(name) total_timesteps=240000
+	$(MAKE) train-ensemble name=$(name) total_timesteps=$(total_timesteps)
 	$(MAKE) inference name=$(name)
 
 train-robust:
