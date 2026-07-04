@@ -26,14 +26,14 @@ inference-robust:
 
 # =============== X-AI methods ================
 shapley:
-	uv run scripts/analysis/shapley_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 6 --n-permutations 6 --months 1200 --no-wandb
+	uv run scripts/analysis/shapley_analysis.py --model $(name) --n-runs 6 --n-permutations 6 --months 1200 --no-wandb
 shapley-robust:
-	uv run scripts/analysis/shapley_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 30 --n-permutations 30 --months 1200 --no-wandb
+	uv run scripts/analysis/shapley_analysis.py --model $(name) --n-runs 30 --n-permutations 30 --months 1200 --no-wandb
 
 counterfactual:
-	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 20 --months 1200 --no-wandb
+	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 20 --months 1200 --no-wandb
 counterfactual-robust:
-	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 100 --months 1200 --no-wandb
+	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 100 --months 1200 --no-wandb
 
 # --- Agent-free causal backbone + 3-method convergence figure ---
 # interventional_xro is agent-free; --model is a label so its output files alongside the ensemble's so `convergence` can find all three npz inputs.
