@@ -6,7 +6,7 @@ trained seeds; saves results for notebook plotting.
 
 Usage:
     uv run scripts/analysis/shapley_analysis.py --model ensemble \
-        --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 30 --months 1200
+        --n-runs 30 --months 1200
 """
 import sys
 import os
@@ -26,6 +26,7 @@ sys.path.insert(0, str(repo_root))
 
 from utils import suppress_warnings
 from utils.results_io import save_csv
+from utils.seeding import discover_seeds
 
 # Fixed variable names — avoids loading PyTorch in main process before fork
 ACTION_NAMES = ['WWV', 'NPMM', 'SPMM', 'IOB', 'IOD', 'SIOD', 'TNA', 'ATL3', 'SASD']
@@ -386,14 +387,18 @@ def main():
     parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
     parser.add_argument("--n-runs", type=int, default=30, help="Independent paired runs per seed")
     parser.add_argument("--n-permutations", type=int, default=20, help="Permutations per run")
-    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
-                        help="Ensemble seeds")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel workers (default: cpu_count - 2; use 1 for serial)")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Disable W&B logging")
     args = parser.parse_args()
+
+    # Ensemble members are always auto-detected from disk.
+    args.seeds = discover_seeds(args.model)
+    if not args.seeds:
+        raise SystemExit(f"No models found matching models/{args.model}_seed*.zip")
+    print(f"Auto-detected {len(args.seeds)} seed(s): {args.seeds}")
 
     suppress_warnings()
     np.random.seed(args.master_seed)

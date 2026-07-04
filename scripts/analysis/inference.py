@@ -51,7 +51,6 @@ Usage:
 
 Seeds are auto-detected from all existing models/{model}_seed*.zip files.
 """
-import re
 import sys
 import time
 import argparse
@@ -66,6 +65,7 @@ sys.path.insert(0, str(repo_root))
 from utils.model_io import load_environment
 from utils.evaluation import simulate_trajectory
 from utils import suppress_warnings
+from utils.seeding import discover_seeds
 from config import EnvConfig
 
 SPINUP = 12  # months to skip as transient at the start of each rollout. NOTE: reset()
@@ -87,27 +87,7 @@ def _encode_classified(classified_array):
     return np.array([_LABEL_MAP.get(s, 0) for s in classified_array[1:]], dtype=np.int8)
 
 
-def _seed_sort_key(s):
-    """Sort ints numerically first, then any string suffixes lexicographically."""
-    return (0, s, "") if isinstance(s, int) else (1, 0, str(s))
-
-
-def discover_seeds(model):
-    """Find ensemble seeds from existing models/{model}_seed*.zip filenames.
-
-    The suffix after `_seed` is returned as an int when it is a plain integer
-    (the ensemble case, e.g. ensemble_seed3.zip), otherwise as the raw string
-    (e.g. a sweep model's 0-0-0-0-3). Returns a sorted list.
-    """
-    seeds = []
-    pat = re.compile(rf"{re.escape(model)}_seed(.+)")
-    for p in sorted(Path("models").glob(f"{model}_seed*.zip")):
-        m = pat.fullmatch(p.stem)
-        if not m:
-            continue
-        tok = m.group(1)
-        seeds.append(int(tok) if tok.lstrip("-").isdigit() else tok)
-    return sorted(seeds, key=_seed_sort_key)
+# discover_seeds now lives in utils.seeding (shared with shapley/counterfactual).
 
 
 def _print_summary(seeds_used, agent_mye_label, base_mye_label):

@@ -25,7 +25,7 @@ class TrainConfig:
     gamma: float = 0.95
 
     # Entropy bonus coeff. >0 keeps policy's action std from collapsing to near-deterministic
-    ent_coef: float = 0.005
+    ent_coef: float = 0.003
 
     # PPO within-update early stop: SB3 halts the epoch loop when approx_kl exceeds
     # 1.5x this. Guards against the runaway KL/clip blowup once the policy sharpens.
