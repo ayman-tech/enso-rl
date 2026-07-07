@@ -1,5 +1,5 @@
 # Main runs
-.PHONY: train train-ensemble inference inference-robust shapley counterfactual shapley-robust counterfactual-robust
+.PHONY: train train-ensemble inference shapley counterfactual shapley-robust counterfactual-robust
 # other runs
 .PHONY : precursor precursor-robust interventional interventional-robust
 # Pipelines
@@ -17,12 +17,12 @@ train:
 	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
 train-ensemble:
 	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --no-wandb
+train-robust:
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
 	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200
-inference-robust:
-	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 100 --months 1200
 
 # =============== X-AI methods ================
 shapley:
