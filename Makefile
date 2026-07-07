@@ -1,5 +1,5 @@
 # Main runs
-.PHONY: train train-ensemble inference shapley counterfactual shapley-robust counterfactual-robust
+.PHONY: train train-ensemble ensemble-robust inference shapley counterfactual shapley-robust counterfactual-robust
 # other runs
 .PHONY : precursor precursor-robust interventional interventional-robust
 # Pipelines
@@ -15,10 +15,10 @@ total_timesteps ?= 1200000
 
 train:
 	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
-train-ensemble:
+ensemble-quick:
 	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --no-wandb
-train-robust:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --no-wandb
+ensemble-robust:
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps 600000 --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
@@ -65,11 +65,11 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) train-ensemble name=$(name) total_timesteps=$(total_timesteps)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps)
 	$(MAKE) inference name=$(name)
 
 train-robust:
-	$(MAKE) train-ensemble name=$(name) total_timesteps=600000
+	$(MAKE) ensemble-robust name=$(name)
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:
