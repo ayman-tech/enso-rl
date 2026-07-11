@@ -186,6 +186,72 @@ def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metri
     return shapley_values, all_marginals
 
 
+def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, seed):
+    """Run ONE coalition rollout and read every phase metric from it.
+
+    The rollout trajectory does not depend on which metric is scored, so the
+    three phase fractions (total / el_nino / la_nina) are all obtained from a
+    single classification of one trajectory (see mye_fraction_by_phase). This is
+    the core of the phase-fusion optimization: it replaces the three separate
+    rollouts the ensemble path used to run (one per phase) with a single rollout,
+    cutting the physics cost ~3x. Numerically it is identical to calling
+    compute_metric_from_trajectory once per phase on the same trajectory.
+
+    Returns dict {'total', 'el_nino', 'la_nina'} of multi-year fractions.
+    """
+    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+
+    obs, _ = env.reset(seed=seed)
+    enso_history = [float(env.state[0])]
+    for _step in range(num_months):
+        action, _ = model.predict(obs, deterministic=True)
+        action = action * coalition_mask.astype(np.float32)
+        obs, _reward, _terminated, _truncated, _ = env.step(action)
+        enso_history.append(float(env.state[0]))
+
+    classified = classify_enso_event(np.asarray(enso_history), threshold=env.threshold)
+    return mye_fraction_by_phase(classified)
+
+
+def compute_shapley_phases_for_seed(env, model, num_months, n_permutations, seed):
+    """Permutation-sampling Shapley for one env seed, all phases at once.
+
+    Uses ONE set of permutations and ONE rollout per coalition, reading every
+    phase metric from that rollout (fusion). Sharing permutations and the env
+    seed across phases is "common random numbers": besides the 3x speedup it also
+    cancels cross-phase sampling noise. The empty-coalition baseline is
+    deterministic for a fixed seed, so it is computed once per permutation set
+    instead of being re-simulated inside every permutation.
+
+    Returns dict {phase: shapley_array[9]}, phases = total / el_nino / la_nina.
+    """
+    n_actions = 9
+    phases = tuple(PHASE_METRICS.keys())
+    marginals = {p: np.zeros((n_permutations, n_actions)) for p in phases}
+
+    # Baseline (empty coalition) is identical for a fixed seed -> compute once.
+    base = simulate_coalition_phase_metrics(
+        env, model, np.zeros(n_actions, dtype=bool), num_months, seed
+    )
+
+    for perm_idx in range(n_permutations):
+        perm = np.random.permutation(n_actions)
+        prev = base
+        for pos in range(n_actions):
+            feature_idx = perm[pos]
+            coalition = np.zeros(n_actions, dtype=bool)
+            coalition[perm[:pos + 1]] = True
+
+            current = simulate_coalition_phase_metrics(
+                env, model, coalition, num_months, seed
+            )
+            for p in phases:
+                marginals[p][perm_idx, feature_idx] = current[p] - prev[p]
+            prev = current
+
+    return {p: marginals[p].mean(axis=0) for p in phases}
+
+
 def _worker_shapley(args):
     """
     Worker function for multiprocessing.
@@ -258,9 +324,14 @@ def _worker_shapley_ensemble(worker_args):
     reproducible and INDEPENDENT of execution order. That determinism is what
     makes the ensemble parallelizable: the previous version threaded a single
     global RNG through nested loops (order-dependent), so it could not be split
-    across processes. The Shapley methodology, env seeds, permutation count, and
-    per-phase handling are all unchanged; only the permutation stream is now
-    seeded per trained seed instead of one continuous global stream. Returns
+    across processes.
+
+    Phase fusion: the loop is now over env seeds (runs), and every run scores all
+    three phases from ONE set of rollouts (compute_shapley_phases_for_seed)
+    instead of re-simulating the full permutation set once per phase. This cuts
+    physics cost ~3x. Because the three phases now share permutations and env
+    seeds, results differ from the pre-fusion runs within Monte-Carlo error (an
+    unbiased common-random-numbers estimator), not bit-for-bit. Returns
     (trained_seed, {phase: mean_sv}) or (seed, None) if the model is missing.
     """
     s, model_name, months, n_runs, n_permutations, master_seed, env_seeds = worker_args
@@ -277,15 +348,13 @@ def _worker_shapley_ensemble(worker_args):
 
     phases = list(PHASE_METRICS.keys())
     feat = ACTION_NAMES
-    out = {}
-    for p in phases:
-        sv_runs = np.zeros((n_runs, len(feat)))
-        for ri, es in enumerate(env_seeds):
-            sv, _ = compute_shapley_for_seed(env, model, months,
-                                             n_permutations, es,
-                                             metric=PHASE_METRICS[p])
-            sv_runs[ri] = sv
-        out[p] = sv_runs.mean(axis=0)
+    sv_runs = {p: np.zeros((n_runs, len(feat))) for p in phases}
+    for ri, es in enumerate(env_seeds):
+        sv_phase = compute_shapley_phases_for_seed(env, model, months,
+                                                   n_permutations, es)
+        for p in phases:
+            sv_runs[p][ri] = sv_phase[p]
+    out = {p: sv_runs[p].mean(axis=0) for p in phases}
     print(f"  [worker] seed={s} done", flush=True)
     return s, out
 
