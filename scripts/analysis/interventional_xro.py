@@ -98,7 +98,7 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
             env.state[gi] += magnitude * (state_std[gi] if state_std is not None else 1.0)
         obs = env._get_obs()
 
-    enso_history = [obs[0]]
+    enso_history = [env.state[0]]
     states = [env.state.copy()] if return_states else None
     action_vec = np.zeros(env.action_space.shape, dtype=np.float32)
     if mode == 'press' and action_idxs is not None:
@@ -108,7 +108,7 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
     for _ in range(num_months):
         obs, _, _, _, _ = env.step(action_vec if mode == 'press' else
                                    np.zeros(env.action_space.shape, dtype=np.float32))
-        enso_history.append(obs[0])
+        enso_history.append(env.state[0])
         if return_states:
             states.append(env.state.copy())
 

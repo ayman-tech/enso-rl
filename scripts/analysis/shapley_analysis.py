@@ -6,7 +6,7 @@ trained seeds; saves results for notebook plotting.
 
 Usage:
     uv run scripts/analysis/shapley_analysis.py --model ensemble \
-        --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 30 --months 1200
+        --n-runs 30 --months 1200
 """
 import sys
 import os
@@ -26,6 +26,7 @@ sys.path.insert(0, str(repo_root))
 
 from utils import suppress_warnings
 from utils.results_io import save_csv
+from utils.seeding import discover_seeds
 
 # Fixed variable names — avoids loading PyTorch in main process before fork
 ACTION_NAMES = ['WWV', 'NPMM', 'SPMM', 'IOB', 'IOD', 'SIOD', 'TNA', 'ATL3', 'SASD']
@@ -126,14 +127,14 @@ def simulate_with_coalition(env, model, coalition_mask, num_months, seed, metric
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
-    enso_history = [float(obs[0])]
+    enso_history = [float(env.state[0])]
 
     for step in range(num_months):
         action, _ = model.predict(obs, deterministic=True)
         action = action * coalition_mask.astype(np.float32)
         obs, reward, terminated, truncated, _ = env.step(action)
         total_reward += reward
-        enso_history.append(float(obs[0]))
+        enso_history.append(float(env.state[0]))
 
     if metric == 'avg_reward':
         return total_reward / num_months
@@ -183,6 +184,72 @@ def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metri
 
     shapley_values = all_marginals.mean(axis=0)
     return shapley_values, all_marginals
+
+
+def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, seed):
+    """Run ONE coalition rollout and read every phase metric from it.
+
+    The rollout trajectory does not depend on which metric is scored, so the
+    three phase fractions (total / el_nino / la_nina) are all obtained from a
+    single classification of one trajectory (see mye_fraction_by_phase). This is
+    the core of the phase-fusion optimization: it replaces the three separate
+    rollouts the ensemble path used to run (one per phase) with a single rollout,
+    cutting the physics cost ~3x. Numerically it is identical to calling
+    compute_metric_from_trajectory once per phase on the same trajectory.
+
+    Returns dict {'total', 'el_nino', 'la_nina'} of multi-year fractions.
+    """
+    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+
+    obs, _ = env.reset(seed=seed)
+    enso_history = [float(env.state[0])]
+    for _step in range(num_months):
+        action, _ = model.predict(obs, deterministic=True)
+        action = action * coalition_mask.astype(np.float32)
+        obs, _reward, _terminated, _truncated, _ = env.step(action)
+        enso_history.append(float(env.state[0]))
+
+    classified = classify_enso_event(np.asarray(enso_history), threshold=env.threshold)
+    return mye_fraction_by_phase(classified)
+
+
+def compute_shapley_phases_for_seed(env, model, num_months, n_permutations, seed):
+    """Permutation-sampling Shapley for one env seed, all phases at once.
+
+    Uses ONE set of permutations and ONE rollout per coalition, reading every
+    phase metric from that rollout (fusion). Sharing permutations and the env
+    seed across phases is "common random numbers": besides the 3x speedup it also
+    cancels cross-phase sampling noise. The empty-coalition baseline is
+    deterministic for a fixed seed, so it is computed once per permutation set
+    instead of being re-simulated inside every permutation.
+
+    Returns dict {phase: shapley_array[9]}, phases = total / el_nino / la_nina.
+    """
+    n_actions = 9
+    phases = tuple(PHASE_METRICS.keys())
+    marginals = {p: np.zeros((n_permutations, n_actions)) for p in phases}
+
+    # Baseline (empty coalition) is identical for a fixed seed -> compute once.
+    base = simulate_coalition_phase_metrics(
+        env, model, np.zeros(n_actions, dtype=bool), num_months, seed
+    )
+
+    for perm_idx in range(n_permutations):
+        perm = np.random.permutation(n_actions)
+        prev = base
+        for pos in range(n_actions):
+            feature_idx = perm[pos]
+            coalition = np.zeros(n_actions, dtype=bool)
+            coalition[perm[:pos + 1]] = True
+
+            current = simulate_coalition_phase_metrics(
+                env, model, coalition, num_months, seed
+            )
+            for p in phases:
+                marginals[p][perm_idx, feature_idx] = current[p] - prev[p]
+            prev = current
+
+    return {p: marginals[p].mean(axis=0) for p in phases}
 
 
 def _worker_shapley(args):
@@ -257,9 +324,14 @@ def _worker_shapley_ensemble(worker_args):
     reproducible and INDEPENDENT of execution order. That determinism is what
     makes the ensemble parallelizable: the previous version threaded a single
     global RNG through nested loops (order-dependent), so it could not be split
-    across processes. The Shapley methodology, env seeds, permutation count, and
-    per-phase handling are all unchanged; only the permutation stream is now
-    seeded per trained seed instead of one continuous global stream. Returns
+    across processes.
+
+    Phase fusion: the loop is now over env seeds (runs), and every run scores all
+    three phases from ONE set of rollouts (compute_shapley_phases_for_seed)
+    instead of re-simulating the full permutation set once per phase. This cuts
+    physics cost ~3x. Because the three phases now share permutations and env
+    seeds, results differ from the pre-fusion runs within Monte-Carlo error (an
+    unbiased common-random-numbers estimator), not bit-for-bit. Returns
     (trained_seed, {phase: mean_sv}) or (seed, None) if the model is missing.
     """
     s, model_name, months, n_runs, n_permutations, master_seed, env_seeds = worker_args
@@ -276,15 +348,13 @@ def _worker_shapley_ensemble(worker_args):
 
     phases = list(PHASE_METRICS.keys())
     feat = ACTION_NAMES
-    out = {}
-    for p in phases:
-        sv_runs = np.zeros((n_runs, len(feat)))
-        for ri, es in enumerate(env_seeds):
-            sv, _ = compute_shapley_for_seed(env, model, months,
-                                             n_permutations, es,
-                                             metric=PHASE_METRICS[p])
-            sv_runs[ri] = sv
-        out[p] = sv_runs.mean(axis=0)
+    sv_runs = {p: np.zeros((n_runs, len(feat))) for p in phases}
+    for ri, es in enumerate(env_seeds):
+        sv_phase = compute_shapley_phases_for_seed(env, model, months,
+                                                   n_permutations, es)
+        for p in phases:
+            sv_runs[p][ri] = sv_phase[p]
+    out = {p: sv_runs[p].mean(axis=0) for p in phases}
     print(f"  [worker] seed={s} done", flush=True)
     return s, out
 
@@ -300,6 +370,7 @@ def run_ensemble(args, output_dir):
     Saves shapley_ensemble.npz for the convergence figure (Part D).
     """
     from scipy.stats import t as t_dist
+    from utils.nb_helper import _fdr
     phases = list(PHASE_METRICS.keys())
     per_seed = {p: [] for p in phases}
     used = []
@@ -354,10 +425,22 @@ def run_ensemble(args, output_dir):
         save_kw[f'ci_{p}'] = ci
         save_kw[f'p_{p}'] = pvals
         save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
-        print(f"\n  === Shapley ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
-        for fi in np.argsort(mean)[::-1]:
-            sig = "***" if pvals[fi] < 0.001 else "**" if pvals[fi] < 0.01 else "*" if pvals[fi] < 0.05 else "ns"
-            print(f"    {feat[fi]:<10} {mean[fi]:+.5f} ± {ci[fi]:.5f}  {sig}")
+
+    # Benjamini-Hochberg across the WHOLE family (n_features x n_phases tests). One
+    # test per (mode, phase) means raw p overstates significance across the family.
+    _P = np.vstack([save_kw[f'p_{p}'] for p in phases])
+    _Q = _fdr(_P)
+    for _i, p in enumerate(phases):
+        save_kw[f'q_{p}'] = _Q[_i]
+        print(f"\n  === Shapley ΔP(MYE) — {p} (N={n_seeds} seeds, BH-FDR) ===")
+        for fi in np.argsort(save_kw[f'mean_{p}'])[::-1]:
+            q = _Q[_i, fi]
+            sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
+            print(f"    {feat[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.5f} "
+                  f"± {save_kw[f'ci_{p}'][fi]:.5f}  p={save_kw[f'p_{p}'][fi]:.4f} "
+                  f"q={q:.4f}  {sig}")
+    print(f"\n  significant: raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
+          f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
     np.savez(output_dir / 'shapley_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'shapley_ensemble.npz'}")
@@ -369,7 +452,8 @@ def run_ensemble(args, output_dir):
             summary_rows.append({'phase': p, 'feature': feature,
                                  'mean_shapley': float(save_kw[f'mean_{p}'][fi]),
                                  'ci95': float(save_kw[f'ci_{p}'][fi]),
-                                 'p': float(save_kw[f'p_{p}'][fi])})
+                                 'p': float(save_kw[f'p_{p}'][fi]),
+                                 'q_fdr': float(save_kw[f'q_{p}'][fi])})
             for si, s in enumerate(used):
                 per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feature,
                                       'shapley': float(save_kw[f'per_seed_{p}'][si, fi])})
@@ -386,14 +470,18 @@ def main():
     parser.add_argument("--months", type=int, default=600, help="Simulation months per evaluation")
     parser.add_argument("--n-runs", type=int, default=30, help="Independent paired runs per seed")
     parser.add_argument("--n-permutations", type=int, default=20, help="Permutations per run")
-    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
-                        help="Ensemble seeds")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel workers (default: cpu_count - 2; use 1 for serial)")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Disable W&B logging")
     args = parser.parse_args()
+
+    # Ensemble members are always auto-detected from disk.
+    args.seeds = discover_seeds(args.model)
+    if not args.seeds:
+        raise SystemExit(f"No models found matching models/{args.model}_seed*.zip")
+    print(f"Auto-detected {len(args.seeds)} seed(s): {args.seeds}")
 
     suppress_warnings()
     np.random.seed(args.master_seed)

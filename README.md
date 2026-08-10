@@ -1,406 +1,341 @@
-# ENSO Reinforcement Learning (RL)
+# ENSO-RL — Reinforcement Learning for Multi-Year ENSO Control
 
-Multi-year ENSO (El Niño Southern Oscillation) climate control using Proximal Policy Optimization (PPO). This project demonstrates how a reinforcement learning agent can learn control strategies to modulate climate indices and increase the probability of multi-year El Niño or La Niña events.
+<p align="left">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.12%2B-blue">
+  <img alt="RL" src="https://img.shields.io/badge/RL-PPO%20(Stable--Baselines3)-green">
+  <img alt="Climate model" src="https://img.shields.io/badge/climate%20model-XRO-lightgrey">
+  <img alt="Status" src="https://img.shields.io/badge/status-research-orange">
+</p>
 
-## 📋 Project Overview
+A reinforcement-learning framework that trains a **PPO agent to steer the XRO stochastic
+climate model** toward **multi-year El Niño / La Niña events (MYE)**, then uses a suite of
+**explainable-AI attributions** to identify *which* climate modes causally drive that
+control. The agent discovers control strategies that are then interrogated with
+counterfactual, Shapley, and interventional analyses — recovering known ENSO physics
+(warm-water-volume recharge, inter-basin coupling) from a purely data-driven policy.
 
-- **Environment**: XRO (Extended Reconstructed Ocean) climate model
-- **Algorithm**: PPO (Proximal Policy Optimization) from Stable Baselines 3
-- **Goal**: Learn climate control actions that promote multi-year ENSO events
-- **Tracking**: Weights & Biases (W&B) integration for experiment monitoring
-- **Data**: ORAS5 SST indices from 1979-2022
+> **Scientific question.** Which climate-mode forcings, and in what combination, most
+> increase the probability of *multi-year* ENSO events — and are those drivers robust
+> across independent methods and random seeds?
 
-## 🏗️ Project Structure
+---
+
+## Table of contents
+- [Overview](#overview)
+- [Key features](#key-features)
+- [Repository structure](#repository-structure)
+- [Installation](#installation)
+- [Data](#data)
+- [Quickstart](#quickstart)
+- [Method summary](#method-summary)
+- [Training](#training)
+- [Evaluation & analysis pipeline](#evaluation--analysis-pipeline)
+- [Notebooks](#notebooks)
+- [Reproducibility](#reproducibility)
+- [Configuration](#configuration)
+- [References](#references)
+- [Citation](#citation)
+- [License & contact](#license--contact)
+
+---
+
+## Overview
+
+ENSO (the El Niño–Southern Oscillation) is modelled here with **XRO** (Zhao et al. 2024,
+*Nature*), a fitted stochastic dynamical model of 10 coupled climate-mode indices. We wrap
+XRO as a **continuing-control Gymnasium environment** in which an agent applies bounded
+monthly forcings to **9 controllable modes** (Niño3.4 is observed, not actioned) with the
+objective of maximising the long-run fraction of months spent in a **multi-year ENSO
+event** (a same-sign |Niño3.4| > 0.5 σ run lasting ≳ 1 year).
+
+The pipeline has two halves:
+
+1. **Control** — train a PPO ensemble to raise the multi-year-ENSO probability above a
+   free-running (zero-action) baseline; the gap is the **lift**.
+2. **Attribution** — explain the learned control with removal-based and causal methods to
+   rank the physical drivers and test their robustness.
+
+## Key features
+
+- **Continuing-task formulation with partial-episode bootstrapping (PEB).** Episodic resets
+  are treated as *truncations* (value-bootstrapped), not terminations — the correct
+  treatment for a task with no terminal state (Pardo et al. 2018).
+- **In-environment observation normalization.** The 10 physical modes are z-scored against
+  the observed climatology so no single mode (e.g. warm-water volume) dominates the policy
+  input; raw physical state is preserved for the reward and all analyses.
+- **Stabilised training.** Return normalization (`VecNormalize`) + value-function clipping +
+  entropy regularization + `target_kl` eliminate the value-loss blow-up and late-training
+  entropy collapse.
+- **Best-checkpointing on the true objective.** The saved model is the one with the best
+  *evaluated multi-year lift*, not the last step — captured via an atomic, in-place save.
+- **10-seed ensembles with five-axis seed control** for reproducibility and
+  randomness-sensitivity studies.
+- **Full XAI attribution suite** — counterfactual ablation, coalitional Shapley,
+  interventional (do-operator) XRO, precursor composites, and policy-facing saliency
+  (integrated gradients, gradient sensitivity, mutual information).
+- **Reproducible `make`-driven workflow** with `quick` (fast) and `robust` (publication)
+  presets for every stage.
+
+---
+
+## Repository structure
 
 ```
 enso-rl/
-├── config/                    # Configuration modules
-│   ├── __init__.py
-│   ├── env_config.py         # Environment parameters
-│   ├── train_config.py       # Training hyperparameters
-│   └── wandb_config.py       # W&B settings
-│
-├── envs/                      # Gymnasium environments
-│   ├── __init__.py
-│   └── xro_env.py            # XROMultiYearEnv class
-│
-├── callbacks/                 # Training callbacks
-│   ├── __init__.py
-│   └── wandb_callback.py     # W&B logging callback
-│
-├── utils/                     # Utility functions
-│   ├── __init__.py
-│   ├── data_processing.py    # Data loading & preprocessing
-│   ├── physics.py            # XRO physics simulation
-│   ├── enso_classifier.py    # ENSO event classification
-│   └── evaluation.py         # Evaluation utilities
-│
-├── scripts/                   # Executable scripts
-│   ├── __init__.py
-│   ├── train.py              # Main training script
-│   └── evaluate.py           # Evaluation & analysis script
-│
-├── notebooks/                 # Jupyter notebooks
-│   ├── 01_setup.ipynb        # Initial setup
-│   ├── 02_train.ipynb        # Training walkthrough
-│   ├── 03_eval.ipynb         # Evaluation analysis
-│   └── 04_analysis.ipynb     # Detailed analysis
-│
-├── data/                      # Data directory
-│   └── XRO_indices_oras5.nc   # Observational indices
-│
-├── models/                    # Saved models (empty)
-├── wandb/                     # W&B run logs (generated)
-├── enso-rl.ipynb             # Original notebook (preserved)
-├── pyproject.toml            # Project dependencies
-└── README.md                 # This file
+├── config/                     # Dataclass configs (single source of truth)
+│   ├── env_config.py           # XRO env: threshold, action scaling, reward weights
+│   ├── train_config.py         # PPO hyperparameters + training duration
+│   └── wandb_config.py         # Weights & Biases settings
+├── envs/
+│   └── xro_env.py              # XROMultiYearEnv (Gymnasium continuing-control env)
+├── callbacks/
+│   ├── training_history_callback.py   # per-seed metrics + best-model checkpointing
+│   └── wandb_callback.py
+├── utils/
+│   ├── data_processing.py      # data loading + XRO parameter preparation
+│   ├── physics.py              # one-step XRO transition (xro_step)
+│   ├── evaluation.py           # rollouts, lift, trajectory simulation
+│   ├── enso_classifier.py      # ENSO event / multi-year-event labelling
+│   ├── seeding.py              # five-axis seed resolution + ensemble discovery
+│   └── model_io.py, results_io.py, nb_helper.py
+├── scripts/
+│   ├── train.py                # train one PPO agent
+│   ├── train_ensemble.py       # train an N-seed ensemble in parallel
+│   ├── evaluate.py             # single-model evaluation / lift / trajectory
+│   └── analysis/               # driver-attribution + XAI computation scripts
+│       ├── inference.py                # paired agent-vs-baseline rollouts → lift/seasonality
+│       ├── counterfactual_analysis.py  # zero-ablation driver importance (ensemble)
+│       ├── shapley_analysis.py         # coalitional Shapley over control channels
+│       ├── interventional_xro.py       # agent-free do-operator interventions
+│       ├── precursor_composite.py      # lead-time driver composites
+│       ├── integrated_gradients.py     # policy obs→action saliency
+│       ├── gradient_sensitivity.py     # policy gradient sensitivity
+│       └── mutual_information.py        # obs–action mutual information
+├── notebooks/                  # offline figure generation (read the .npz outputs)
+├── data/                       # XRO_indices_oras5.nc (ORAS5 indices, 1979–2022)
+├── models/                     # trained model checkpoints (<name>_seed<N>.zip)
+├── plots/                      # per-model analysis outputs (.npz, .csv, figures)
+├── Architecture.md             # full hyperparameter + reward-function reference
+├── Makefile                    # reproducible workflow (quick / robust presets)
+└── pyproject.toml              # dependencies (managed with uv)
 ```
 
-## ⚙️ Dependencies
+---
 
-The project uses the following key packages:
-- `stable-baselines3`: RL algorithms
-- `gymnasium`: Environment interface
-- `xarray`: Data handling
-- `wandb`: Experiment tracking
-- `XRO`: Climate model
-- `numpy`, `pandas`, `matplotlib`: Data processing & visualization
+## Installation
 
-See `pyproject.toml` for complete list.
-
-## 🚀 Quick Start
-
-### 1. Prerequisites
-
-Ensure you have Python 3.12+ installed:
+Requires **Python ≥ 3.12**. Dependencies are managed with [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-python --version
+# From the repo root:
+uv sync            # creates .venv and installs all dependencies from uv.lock
 ```
 
-### 2. Install Dependencies
+Key dependencies: `stable-baselines3` (PPO), `gymnasium`, `xro`, `xarray`, `numpy`, `scipy`,
+`wandb`, `pandas`, `matplotlib`.
 
-```bash
-# Using pip
-pip install -r requirements.txt
+## Data
 
-# Or using uv (if installed)
-uv sync
-```
-
-### 3. Data Setup
-
-The observational data is automatically downloaded during training if not present. To pre-download:
+The environment is fit on **ORAS5 climate-mode indices (1979–2022)** from the XRO project.
+Place the file at `data/XRO_indices_oras5.nc`:
 
 ```bash
 mkdir -p data
 wget -c -P data/ https://github.com/senclimate/XRO/raw/main/data/XRO_indices_oras5.nc
 ```
 
-### 4. Weights & Biases Setup (Optional)
+---
 
-For experiment tracking with W&B:
+## Quickstart
 
-```bash
-# Configure W&B
-wandb login
-
-# Update config/wandb_config.py with your entity name if needed
-```
-
-## 🎯 Running the Project
-
-### Training the Agent
-
-#### Basic Training (Using Defaults)
+The `Makefile` is the primary interface. `name=<prefix>` labels the run; models are saved
+to `models/<prefix>_seed<N>.zip` and analysis outputs to `plots/<prefix>/`.
 
 ```bash
-python scripts/train.py
+# 1. Train a 10-seed ensemble + paired inference (fast preset)
+make train-quick   name=ensemble
+
+# 2. Driver-attribution suite (counterfactual + Shapley + interventional)
+make xai-quick     name=ensemble
+
+# --- or the full publication pipeline (longer training, more samples) ---
+make full-robust   name=ensemble
 ```
 
-#### Training with Custom Hyperparameters
-
-```bash
-# Debug mode with reduced training
-python scripts/train.py --debug --epochs 50 --lr 0.0001
-
-# Full training with custom learning rate
-python scripts/train.py --epochs 6000 --lr 0.0003
-
-# Training without W&B logging
-python scripts/train.py --no-wandb
-```
-
-#### Available Training Options
-
-```
-Options:
-  --debug              Enable debug mode with verbose output
-  --epochs EPOCHS      Override training epochs (default: 6000)
-  --lr LR             Override learning rate (default: 0.0003)
-  --no-wandb          Disable Weights & Biases logging
-  --help              Show help message
-```
-
-### Evaluating the Agent
-
-#### Quick Evaluation
-
-```bash
-python scripts/evaluate.py --model ppo_enso_model.zip
-```
-
-#### Detailed Analysis
-
-```bash
-# All evaluations (basic + intervention + trajectory)
-python scripts/evaluate.py --model ppo_enso_model.zip --all
-
-# Basic agent vs baseline comparison
-python scripts/evaluate.py --model ppo_enso_model.zip --basic
-
-# Interventional analysis (ablation study showing variable importance)
-python scripts/evaluate.py --model ppo_enso_model.zip --intervention --steps 1200
-
-# Trajectory analysis with time series export
-python scripts/evaluate.py --model ppo_enso_model.zip --trajectory --months 2400
-
-# Custom evaluation steps
-python scripts/evaluate.py --model ppo_enso_model.zip --steps 10000
-```
-
-#### Evaluation Outputs
-
-- **Basic Evaluation**: Compares multi-year event frequency (agent vs baseline)
-- **Interventional Analysis**: Shows impact of each controllable variable (ablation study)
-- **Trajectory Analysis**: Generates `trajectory_analysis.csv` with detailed time series data
-- **Results Summary**: Printed to console for immediate analysis
-
-## 📊 Configuration
-
-All configurations are defined in the `config/` directory as Python dataclasses. Modify these files before training to customize behavior.
-
-### Environment Configuration (`config/env_config.py`)
-
-```python
-threshold = 0.5                  # ENSO event threshold magnitude (ONI standard)
-action_scale = [0.15, ...]      # Scaling factors for each control variable
-max_steps = None                # None = continuous (no episode resets)
-```
-
-### Training Configuration (`config/train_config.py`)
-
-```python
-train_epochs = 6000             # Total training timesteps
-n_steps = 600                   # Policy update frequency
-learning_rate = 0.0003          # PPO learning rate
-debug_mode = True               # Verbose training output
-```
-
-### W&B Configuration (`config/wandb_config.py`)
-
-```python
-project = "enso-rl"
-entity = "your-username"        # Change to your W&B username
-mode = "online"                 # "online", "offline", or "disabled"
-```
-
-## 📈 Training Monitoring
-
-### With Weights & Biases
-
-The training script automatically logs:
-- **Real-time metrics**: Episode rewards, policy loss, value loss, KL divergence
-- **Hyperparameters**: All settings and configurations
-- **Model artifacts**: Trained model checkpoints
-- **Evaluation results**: Performance comparison data
-
-View results: https://wandb.ai/your-username/enso-rl
-
-### Local Training Output Example
-
-```
-================================
-ENSO RL AGENT TRAINING PIPELINE
-================================
-
-SETTING UP ENVIRONMENT
-======================
-1. Loading observational data...
-   Loaded 10 variables
-
-2. Preparing XRO model...
-   XRO model fitted
-
-3. Initializing Weights & Biases...
-   View experiment at: https://wandb.ai/...
-
-4. Creating Gymnasium environment...
-   Environment created
-
-STARTING PPO TRAINING
-====================
-Total timesteps: 6000
-Learning rate: 0.0003
-...
-✓ Training completed successfully!
-✓ Model saved to ppo_enso_model.zip
-```
-
-## 🔬 Usage Examples
-
-### Example 1: Quick Testing
-
-```bash
-# Train for short period to test setup
-python scripts/train.py --debug --epochs 100 --lr 0.0001
-
-# Evaluate the test model
-python scripts/evaluate.py --model ppo_enso_model.zip --basic
-```
-
-### Example 2: Full Training and Analysis Pipeline
-
-```bash
-# 1. Train the agent
-python scripts/train.py --epochs 6000 --lr 0.0003
-
-# 2. Run comprehensive evaluation
-python scripts/evaluate.py --model ppo_enso_model.zip --all
-
-# 3. View results
-# - Check console output for statistics summary
-# - Check trajectory_analysis.csv for detailed time series data
-# - View W&B dashboard at https://wandb.ai/your-username/enso-rl
-```
-
-### Example 3: Hyperparameter Test
-
-```bash
-# Test different learning rates
-for lr in 0.0001 0.0003 0.001; do
-    echo "Training with learning rate = $lr"
-    python scripts/train.py --epochs 3000 --lr $lr --no-wandb
-    python scripts/evaluate.py --model ppo_enso_model.zip --basic
-done
-```
-
-### Example 4: Disable W&B Logging
-
-```bash
-# Train without W&B (useful for offline work or testing)
-python scripts/train.py --no-wandb --epochs 100 --debug
-```
-
-## 📓 Jupyter Notebooks
-
-Interactive notebooks for detailed exploration:
-
-- **01_setup.ipynb**: Data loading, exploration, and XRO model setup
-- **02_train.ipynb**: Step-by-step training walkthrough
-- **03_eval.ipynb**: Evaluation and performance analysis
-- **04_analysis.ipynb**: Deep dive into ENSO event patterns
-
-Run notebooks:
-
-```bash
-# Using Jupyter Lab
-jupyter lab
-
-# Using Jupyter Notebook
-jupyter notebook
-
-# Or use VSCode integrated notebook support
-# Open any .ipynb file in VS Code and select "Run"
-```
-
-## 🧪 Understanding Results
-
-### Key Metrics
-
-- **Multi-year Event Probability**: Percentage of time steps containing multi-year ENSO events
-- **Delta R (ΔR)**: Change in average reward when disabling each action (more negative = more important)
-- **Classified Event**: Type of ENSO event for a trajectory (Multi-year El Niño, La Niña, etc.)
-- **Improvement**: How much better the agent performs vs baseline
-
-### Example Output Interpretation
-
-```
-With RL Agent Control:      42.5%     # Agent achieves 42.5% multi-year events
-Without Control (Baseline): 15.0%     # Baseline achieves 15.0%
-Improvement:               +27.5pp   # 27.5 percentage point gain
-Improvement ratio:          2.83x    # Agent is 2.83x better than baseline
-```
-
-### Interventional Analysis
-
-Lower ΔR values indicate more critical variables:
-
-```
-Feature Importance (most important first):
-1. IOB     - ΔR: -0.77  (CRITICAL - largest impact)
-2. NPMM    - ΔR: -0.64  (CRITICAL - important for multi-year events)
-3. WWV     - ΔR: -0.11  (MODERATE - some impact)
-4. Others  - ΔR: ~0.00  (MINIMAL - little impact)
-```
-
-## 🔧 Troubleshooting
-
-### Model or Data Issues
-
-**Problem**: "Model not found" error
-```bash
-# Solution: Ensure training completed successfully
-ls -la ppo_enso_model.zip
-```
-
-**Problem**: Data file not found
-```bash
-# Solution: Download manually
-mkdir -p data
-wget -P data/ https://github.com/senclimate/XRO/raw/main/data/XRO_indices_oras5.nc
-```
-
-**Problem**: XRO import errors
-```bash
-# Solution: Reinstall XRO package
-pip install --upgrade XRO
-```
-
-### W&B Issues
-
-**Problem**: W&B login fails
-```bash
-# Solution: Re-login or disable W&B
-wandb login --relogin
-# Or
-python scripts/train.py --no-wandb
-```
-
-**Problem**: Permission denied on wandb files
-```bash
-# Solution: Clean wandb cache
-rm -rf ~/.wandb
-wandb login
-```
-
-### Performance Issues
-
-**Problem**: Training is slow or out of memory
-```bash
-# Solution: Reduce batch size or training steps
-python scripts/train.py --epochs 1000 --lr 0.0001 --debug
-```
-
-## 📧 Contact & Support
-
-For questions, issues, or suggestions:
-
-- Open a GitHub Issue
-- Check existing issues and discussions
-- Review the reference materials above
+Then open the notebooks in `notebooks/` to render figures from the generated `.npz` files.
+
+**Duration presets** (env steps; 1 step = 1 month): `train-quick` uses 240k, `train-robust`
+uses 600k. Override per-invocation, e.g.
+`make train-ensemble name=ensemble total_timesteps=1200000`.
 
 ---
 
-**Original Notebook**: `enso-rl.ipynb` (preserved for reference)  
-**Refactored Code Structure**: Organized into modular components following ML best practices
+## Method summary
+
+Full details (every hyperparameter and every reward term) are in
+**[`Architecture.md`](Architecture.md)**. In brief:
+
+**Environment (`XROMultiYearEnv`).** Continuing-control task; each step advances XRO one
+month under the agent's forcing. Observation = 10 climatology-z-scored modes + seasonal
+month + current event-duration feature (12-D). Action = 9-D in `[-1, 1]`, scaled per-mode
+per-month by the observed typical monthly change. Episodic resets (`max_episode_steps`)
+re-anchor to a real observed initial condition and are handled as **truncations** (PEB).
+
+**Reward** = multi-year-duration reward − over-persistence penalty − state-plausibility
+(Mahalanobis) penalty − action-effort cost. Both penalties use **saturating (tanh) ramps**
+so a single extreme step cannot destabilise the critic; the plausibility threshold is
+anchored to the observed climatology envelope. See [`Architecture.md`](Architecture.md) §4.
+
+**Algorithm.** PPO (Stable-Baselines3, `MlpPolicy`) with `gamma=0.95`, `n_steps=240`,
+`n_epochs=10`, `clip_range_vf=0.2`, `ent_coef=0.003`, `target_kl=0.03`; the training env is
+wrapped in `Monitor` + `VecNormalize(norm_reward=True)`. The reported metric — the
+multi-year-ENSO **lift** over a zero-action baseline — drives **best-model checkpointing**.
+
+---
+
+## Training
+
+```bash
+# Single agent
+uv run scripts/train.py --total-timesteps 240000 --name my-run
+
+# Full ensemble (10 seeds, parallel)
+uv run scripts/train_ensemble.py --prefix ensemble --n-seeds 10 --total-timesteps 600000 --no-wandb
+
+# via Makefile
+make train          name=my-run          # single, 240k default
+make train-ensemble name=ensemble        # 10-seed ensemble
+```
+
+**`scripts/train.py` options**
+
+| Flag | Description |
+|---|---|
+| `--total-timesteps N` | Total env steps for `model.learn()` (1 step = 1 month) |
+| `--max-episode-steps N` | Episode length before a truncation/reset (default 1200 = 100 yr) |
+| `--lr LR` | Learning-rate override |
+| `--name NAME` | Run / model name |
+| `--seed S` | Master seed (sets all five randomness axes) |
+| `--seed-{weight,action,batch,init,physics} S` | Per-axis seed override (sensitivity study) |
+| `--no-wandb` | Disable Weights & Biases logging |
+| `--debug` | Verbose mode |
+
+Entropy coefficient, target-KL, discount, and other PPO knobs live in
+[`config/train_config.py`](config/train_config.py).
+
+---
+
+## Evaluation & analysis pipeline
+
+All analysis scripts **auto-detect the trained ensemble** from `models/<name>_seed*.zip`
+and write results to `plots/<name>/`. Each stage has a `quick` and a `robust` preset.
+
+**Control performance**
+
+```bash
+make inference name=ensemble          # paired agent-vs-baseline rollouts → lift + seasonality
+```
+
+**Driver attribution** (the causal backbone)
+
+```bash
+make counterfactual name=ensemble     # zero-ablation importance of each control channel
+make shapley        name=ensemble     # coalitional Shapley over the 9 control channels
+make interventional name=ensemble     # agent-free do-operator interventions in XRO
+make xai-quick      name=ensemble     # all three of the above
+```
+
+- **Counterfactual** and **Shapley** are complementary *removal-based* attributions
+  (Covert, Lundberg & Lee 2021); their agreement across methods and across the 10 seeds is
+  the robustness evidence.
+- **Interventional XRO** is agent-free: it directly presses/brakes a mode in a free-running
+  XRO and measures the causal ΔP(MYE) — the do-operator counterpart.
+
+**Supporting analyses**
+
+```bash
+make precursor      name=ensemble     # lead-time driver composites (drivers vs spontaneous MYE)
+make policy-facing  name=ensemble     # obs→action saliency (IG, gradient sensitivity, MI)
+```
+
+Single-model evaluation is available via `scripts/evaluate.py` (`--basic`, `--lift`,
+`--trajectory`, `--intervention`, `--all`).
+
+---
+
+## Notebooks
+
+Notebooks are **offline figure generators** — they read the `.npz` files produced by the
+scripts above and never retrain.
+
+| Notebook | Purpose |
+|---|---|
+| `notebooks/analysis.ipynb` | Behaviour, multi-year lift, and seasonality figures (from `inference.npz`) |
+| `notebooks/analysis_xai.ipynb` | Driver attribution: counterfactual, Shapley, cross-method convergence, interventional, precursor, policy-facing saliency |
+| `notebooks/train_analysis.ipynb` | Ensemble convergence: lift, raw reward, and PPO optimization diagnostics (median + IQR across seeds) |
+| `notebooks/seed_sensitivity.ipynb` | Randomness-axis sensitivity study |
+
+---
+
+## Reproducibility
+
+- **Five independent randomness axes** are seeded separately (policy-weight init, action
+  sampling, mini-batch shuffle, env start state, XRO climate noise), enabling both fully
+  reproducible runs and controlled one-axis-at-a-time sensitivity sweeps
+  (`seed_axis_test.sh`, `notebooks/seed_sensitivity.ipynb`).
+- **10-seed ensembles** are the unit of reporting; attribution significance is computed
+  *across seeds* (per-seed means → confidence intervals / p-values). We recommend reporting
+  IQM + bootstrapped CIs (Agarwal et al. 2021) for the final figures.
+- The XRO climate-noise stream is isolated from PPO's global-RNG usage so evaluation cannot
+  perturb training.
+
+---
+
+## Configuration
+
+All configuration is declarative in `config/` (Python dataclasses):
+
+| File | Controls |
+|---|---|
+| [`config/train_config.py`](config/train_config.py) | PPO hyperparameters, training duration, episode length, eval cadence |
+| [`config/env_config.py`](config/env_config.py) | ENSO threshold, per-mode/per-month action scaling, reward weights & penalty caps |
+| [`config/wandb_config.py`](config/wandb_config.py) | Weights & Biases project/entity/mode |
+
+See [`Architecture.md`](Architecture.md) for the full annotated reference and the values
+currently in use.
+
+---
+
+## References
+
+- **XRO climate model** — Zhao, S. et al. (2024). *Explainable El Niño predictability from
+  climate mode interactions.* **Nature**. (`senclimate/XRO`)
+- **PPO** — Schulman, J. et al. (2017). *Proximal Policy Optimization Algorithms.*
+  arXiv:1707.06347.
+- **Stable-Baselines3** — Raffin, A. et al. (2021). *JMLR* 22(268).
+- **Time limits / PEB** — Pardo, F. et al. (2018). *Time Limits in Reinforcement Learning.*
+  ICML.
+- **Removal-based explanations** — Covert, I., Lundberg, S. & Lee, S.-I. (2021). *Explaining
+  by Removing: A Unified Framework for Model Explanation.* **JMLR**. / Lundberg & Lee (2017),
+  *SHAP*, NeurIPS.
+- **Evaluation rigor** — Henderson, P. et al. (2018), *Deep RL that Matters*; Agarwal, R.
+  et al. (2021), *Deep RL at the Edge of the Statistical Precipice* (`rliable`).
+
+## Citation
+
+A manuscript describing this work is in preparation. Until then, please cite this
+repository:
+
+```bibtex
+@software{enso_rl,
+  title  = {ENSO-RL: Reinforcement Learning for Multi-Year ENSO Control},
+  author = {Sayed, Ayman},
+  year   = {2026},
+  url    = {https://github.com/<your-org>/enso-rl}
+}
+```
+
+## License & contact
+
+No license file is currently included; please contact the author before reuse.
+Questions and issues: **Ayman Sayed** · open a GitHub issue on this repository.

@@ -20,6 +20,7 @@ member this is `plots/<prefix>/train_seed<N>.npz`, co-located with that prefix's
 The offline aggregator is `notebooks/train_analysis.ipynb`, which globs
 `plots/<prefix>/train_seed*.npz` and plots median + IQR bands across seeds.
 """
+import os
 import sys
 import time
 from pathlib import Path
@@ -70,7 +71,8 @@ class TrainingHistoryCallback(BaseCallback):
     """
 
     def __init__(self, eval_env, out_dir, run_stem, model_name, eval_freq=24000,
-                 eval_steps=1200, n_episodes=3, log_baseline=True, verbose=1):
+                 eval_steps=1200, n_episodes=3, log_baseline=True,
+                 best_model_path=None, verbose=1):
         super().__init__(verbose)
         self.eval_env = eval_env
         self.eval_freq = eval_freq
@@ -78,7 +80,11 @@ class TrainingHistoryCallback(BaseCallback):
         self.n_episodes = n_episodes
         self.log_baseline = log_baseline
         self._next_eval = eval_freq
-        self._baseline_mye = None  # cached: baseline is policy-independent
+        self._baseline_mye = None      # cached: baseline is policy-independent
+        self._baseline_reward = None   # cached alongside _baseline_mye
+
+        self.best_model_path = best_model_path
+        self._best_metric = -np.inf
 
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -95,43 +101,54 @@ class TrainingHistoryCallback(BaseCallback):
 
     # ------------------------------------------------------------------ eval ---
     def _mean_mye(self, agent):
-        """Average mye_prob over n_episodes independent rollouts.
+        """Average mye_prob AND raw per-step reward over n_episodes independent rollouts.
 
         evaluate_agent() calls eval_env.reset() with no seed each time, so every
         rollout draws a fresh start state and noise sequence — the runs are
-        independent and averaging them lowers the variance of the estimate.
+        independent and averaging them lowers the variance of the estimate. The
+        eval env is unwrapped, so the returned reward is in RAW (un-normalized)
+        units — comparable across training, unlike the VecNormalize-scaled
+        rollout-buffer reward logged in `_on_rollout_end`.
         """
-        vals = [
+        mye, rew = zip(*[
             evaluate_agent(self.eval_env, agent=agent,
-                           continuous_steps=self.eval_steps)
+                           continuous_steps=self.eval_steps, return_reward=True)
             for _ in range(self.n_episodes)
-        ]
-        return float(np.mean(vals)), float(np.std(vals))
+        ])
+        return float(np.mean(mye)), float(np.std(mye)), float(np.mean(rew))
 
     def _run_eval(self):
         t0 = time.time()
-        mye_mean, mye_std = self._mean_mye(self.model)
+        mye_mean, mye_std, rew_mean = self._mean_mye(self.model)
 
         row = {
             "timestep": int(self.num_timesteps),
             "mye_prob": mye_mean,
             "mye_prob_std": mye_std,
+            "mean_reward": rew_mean,  # RAW per-step reward (eval env is unwrapped)
         }
         log_dict = {
             "eval/mye_prob": mye_mean,
             "eval/mye_prob_std": mye_std,
+            "eval/mean_reward": rew_mean,
             "eval/timesteps": self.num_timesteps,
         }
 
         if self.log_baseline:
             if self._baseline_mye is None:
-                self._baseline_mye, _ = self._mean_mye(agent=None)
+                self._baseline_mye, _, self._baseline_reward = self._mean_mye(agent=None)
             row["mye_baseline"] = self._baseline_mye
             row["mye_lift"] = mye_mean - self._baseline_mye
+            row["baseline_reward"] = self._baseline_reward
             log_dict["eval/mye_prob_baseline"] = self._baseline_mye
             log_dict["eval/mye_lift"] = row["mye_lift"]
+            log_dict["eval/baseline_reward"] = self._baseline_reward
 
         self._eval_rows.append(row)
+
+        # Best-model checkpoint
+        metric = row.get("mye_lift", mye_mean)
+        self._maybe_save_best(metric)
 
         if wandb.run is not None:
             wandb.log(log_dict)
@@ -148,19 +165,46 @@ class TrainingHistoryCallback(BaseCallback):
             msg += f" | {time.time() - t0:.1f}s"
             print(msg, file=self._stdout, flush=True)
 
+    def _maybe_save_best(self, metric):
+        """Save the policy to best_model_path iff `metric` beats the running best.
+
+        Writes to a temp stem then atomically os.replace()s onto <path>.zip, so a run
+        killed mid-save cannot leave a truncated model. Overwrites in place — one file
+        per run, no step-numbered checkpoints.
+        """
+        if self.best_model_path is None or not np.isfinite(metric):
+            return
+        if metric <= self._best_metric:
+            return
+        self._best_metric = metric
+        # Pass an explicit .zip path: SB3 only auto-appends .zip when the path has no
+        # suffix, so a ".tmp" stem would be written without .zip and break the rename.
+        tmp_path = f"{self.best_model_path}.tmp.zip"
+        self.model.save(tmp_path)
+        os.replace(tmp_path, f"{self.best_model_path}.zip")
+        if self.verbose > 0:
+            print(f"[TrainHistory] new best metric={metric:+.3f} -> saved "
+                  f"{self.best_model_path}.zip", file=self._stdout, flush=True)
+
     # -------------------------------------------------------------- diagnostics ---
     def _on_rollout_end(self) -> None:
         """One diagnostics row per PPO update (fires after each rollout collection).
 
-        The primary reward signal is the mean step reward of the just-collected
-        rollout buffer: this env trains continuously (`episode_length=None`, no
-        resets), so `ep_info_buffer` stays empty and episode reward is unavailable.
-        `ep_rew_mean` is still recorded best-effort (populated only if resets ever
-        happen). Optimization metrics come from the SB3 logger and default to NaN
-        until the first `train()` has populated them.
+        Records the (normalized) mean rollout-buffer reward plus the raw episodic
+        return `ep_rew_mean`/`ep_len_mean` from `ep_info_buffer`. With episodic
+        training (`max_episode_steps` set) and the Monitor wrapper around the raw env,
+        `ep_info_buffer` populates with RAW (pre-VecNormalize) episode returns once
+        episodes complete; before the first completed episode these stay NaN.
+        Optimization metrics come from the SB3 logger and default to NaN until the
+        first `train()` has populated them.
         """
         row = {"timestep": int(self.num_timesteps)}
 
+        # NOTE: this is the VecNormalize-scaled reward PPO actually optimizes, so its
+        # magnitude is in normalized units with a drifting denominator — a training
+        # diagnostic, NOT comparable across training. For an interpretable reward
+        # curve use the eval stream's RAW `eval_mean_reward` (see _run_eval) or the
+        # raw episodic return `ep_rew_mean` (populated by the Monitor wrapper).
         rb = getattr(self.model, "rollout_buffer", None)
         row["mean_reward"] = (float(np.mean(rb.rewards))
                               if rb is not None and rb.rewards is not None
@@ -214,8 +258,12 @@ class TrainingHistoryCallback(BaseCallback):
             npz[col] = np.array([r.get(col, np.nan) for r in self._train_rows],
                                 dtype=float)
 
-        # Sparse eval stream.
-        eval_cols = ["mye_prob", "mye_prob_std", "mye_baseline", "mye_lift"]
+        # Sparse eval stream. `mean_reward`/`baseline_reward` here are RAW per-step
+        # rewards from the unwrapped eval env (comparable across training); they are
+        # written as eval_mean_reward / eval_baseline_reward, distinct from the dense
+        # (normalized) train-stream `mean_reward` below.
+        eval_cols = ["mye_prob", "mye_prob_std", "mye_baseline", "mye_lift",
+                     "mean_reward", "baseline_reward"]
         npz["eval_timesteps"] = np.array(
             [r["timestep"] for r in self._eval_rows], dtype=float)
         for col in eval_cols:

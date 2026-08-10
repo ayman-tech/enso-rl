@@ -2,11 +2,12 @@
 Main training script for ENSO RL agent.
 
 Usage (normal and Full customizable run):
-    uv run scripts/train.py --epochs 1000 --name "ppo-train"
-    uv run scripts/train.py --epochs 1000 --name "ppo-train" --lr 0.0001 --no-wandb --debug
+    uv run scripts/train.py --total-timesteps 240000 --name "ppo-train"
+    uv run scripts/train.py --total-timesteps 240000 --name "ppo-train" --lr 0.0001 --no-wandb --debug
 """
 import sys
 import io
+import os
 import time
 import argparse
 import warnings
@@ -21,6 +22,8 @@ import torch as th
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Import configurations and utilities
 from config import TrainConfig, EnvConfig, WandbConfig
@@ -93,8 +96,9 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
     hyperparameters = {
         "algorithm": "PPO",
         "policy": "MlpPolicy",
-        "train_epochs": train_config.train_epochs,
-        "env_max_steps": train_config.episode_length,
+        "total_timesteps": train_config.total_timesteps,
+        "n_epochs": train_config.n_epochs,
+        "max_episode_steps": train_config.max_episode_steps,
         "action_space_dim": env_config.action_dim,
         "observation_space_dim": env_config.obs_dim,
         "action_scale": env_config.action_scale,
@@ -138,10 +142,11 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
     print("\n" + "="*70)
     print("STARTING PPO TRAINING")
     print("="*70)
-    print(f"Total timesteps: {round(train_config.train_months/12):,} yrs or {train_config.train_months:,} months")
+    print(f"Total timesteps: {round(train_config.total_timesteps/12):,} yrs or {train_config.total_timesteps:,} months")
     print(f"Learning rate: {train_config.learning_rate}")
     print(f"Discount factor (gamma): {train_config.gamma}")
-    print(f"Update frequency (n_steps): {train_config.n_steps}")
+    print(f"Rollout length (n_steps): {train_config.n_steps} | optimization passes (n_epochs): {train_config.n_epochs}")
+    print(f"Episode length (max_episode_steps): {train_config.max_episode_steps}")
 
     # Capture verbose output
     output_buffer = io.StringIO()
@@ -156,7 +161,11 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
             env=env,
             learning_rate=train_config.learning_rate,
             n_steps=train_config.n_steps,
+            n_epochs=train_config.n_epochs,
             gamma=train_config.gamma,
+            clip_range_vf=train_config.clip_range_vf,
+            ent_coef=train_config.ent_coef,
+            target_kl=train_config.target_kl,
             seed=seeds.weight,
             verbose=1
         )
@@ -175,7 +184,7 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
         if eval_env is not None:
             # Evaluate roughly 20 times over the run (at least every 24k steps)
             eval_freq = max(train_config.n_steps,
-                            min(24000, train_config.train_months // 20))
+                            min(24000, train_config.total_timesteps // 20))
             # Co-locate training history with the run-group's inference.npz under
             # plots/<group>/, as train_seed<...>.{npz,csv} (one folder per group, not
             # one per seed).
@@ -196,11 +205,12 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
                 run_stem=run_stem,
                 model_name=name,
                 eval_freq=eval_freq,
-                eval_steps=train_config.sim_months,
+                eval_steps=train_config.eval_steps,
+                best_model_path=train_config.model_save_path,
                 verbose=1,
             ))
         model.learn(
-            total_timesteps=train_config.train_months,
+            total_timesteps=train_config.total_timesteps,
             callback=callbacks
         )
         
@@ -211,10 +221,12 @@ def train_ppo_agent(env, train_config: TrainConfig, wandb_config: WandbConfig,
         # Parse metrics
         print("[OK] Training completed successfully!")
         
-        # Save model
-        model.save(train_config.model_save_path)
-        train_config.model_save_path = "models/"+wandb_config.name
-        print(f"[OK] Model saved to {train_config.model_save_path}.zip")
+        if eval_env is not None and os.path.exists(f"{train_config.model_save_path}.zip"):
+            model = PPO.load(train_config.model_save_path, env=env)
+            print(f"[OK] Loaded best checkpoint from {train_config.model_save_path}.zip")
+        else:
+            model.save(train_config.model_save_path)
+            print(f"[OK] Model saved to {train_config.model_save_path}.zip")
         
         # Log model as artifact (only if W&B is enabled)
         if wandb.run is not None:
@@ -287,7 +299,10 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description="Train ENSO RL Agent")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
+    parser.add_argument("--total-timesteps", type=int, default=None,
+                        help="Override total training timesteps (env steps for model.learn)")
+    parser.add_argument("--max-episode-steps", type=int, default=None,
+                        help="Override episode length (months); resets every this many steps")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--seed", type=int, default=None,
                         help="Master random seed. By default every randomness axis "
@@ -312,9 +327,10 @@ def main():
     # Override with command line args
     if args.debug:
         train_config.debug_mode = True
-    if args.epochs:
-        train_config.train_epochs = args.epochs
-        train_config.train_months = args.epochs * train_config.n_steps
+    if args.total_timesteps:
+        train_config.total_timesteps = args.total_timesteps
+    if args.max_episode_steps is not None:
+        train_config.max_episode_steps = args.max_episode_steps
     if args.lr:
         train_config.learning_rate = args.lr
     if args.no_wandb:
@@ -356,33 +372,51 @@ def main():
         # env-side randomness axes; reseed_on_reset=False so SB3's reset(seed=weight)
         # cannot couple them to the weight axis.
         print("\n4. Creating Gymnasium environment...")
-        env = XROMultiYearEnv(
+        # Episodic training env: resets every max_episode_steps for start-state
+        # diversity. step() returns truncated (not terminated) at the limit, so SB3
+        # bootstraps the value there (partial-episode bootstrapping) — the correct
+        # treatment for this continuing task.
+        raw_env = XROMultiYearEnv(
             params=params,
             train_ds=train_ds,
             var_names=var_names,
-            max_steps=train_config.episode_length,
+            max_steps=train_config.max_episode_steps,
             seed_init=seeds.init,
             seed_physics=seeds.physics,
             reseed_on_reset=False,
         )
+        # Monitor (inside VecNormalize) records RAW, pre-normalization episode returns
+        # into ep_info_buffer -> the callback's ep_rew_mean/ep_len_mean become real.
+        # VecNormalize then normalizes the *returns* (not obs - those are already
+        # z-scored in-env) by a running std so value targets stay O(1) despite the
+        # soft-constraint penalties.
+        env = VecNormalize(
+            DummyVecEnv([lambda: Monitor(raw_env)]),
+            norm_obs=False,
+            norm_reward=True,
+            gamma=train_config.gamma,
+        )
         print("\t[OK] Environment created")
 
-        # Separate env for periodic mye_prob evaluation during training (kept distinct
-        # so eval resets don't corrupt the PPO rollout). Left unseeded: it only feeds
-        # the logged mye_prob curve and, thanks to the global-RNG isolation in
-        # xro_step, cannot perturb the training shuffle or the trained model.
+        # Separate env for periodic mye_prob/reward evaluation during training (kept
+        # distinct so eval resets don't corrupt the PPO rollout). CONTINUOUS
+        # (max_steps=None) so each eval is one clean uninterrupted rollout — this
+        # matches the continuing objective PEB optimizes and the regime of the final
+        # inference.npz. Left unseeded: it only feeds the logged eval curves and,
+        # thanks to the global-RNG isolation in xro_step, cannot perturb the training
+        # shuffle or the trained model.
         eval_env = XROMultiYearEnv(
             params=params,
             train_ds=train_ds,
             var_names=var_names,
-            max_steps=train_config.episode_length
+            max_steps=None,
         )
 
         # Train
         model = train_ppo_agent(env, train_config, wandb_config, seeds, eval_env=eval_env)
         
-        # Evaluate
-        evaluate_trained_model(env, model)
+        # Evaluate on the unwrapped env (gym API + env.state/env.threshold)
+        evaluate_trained_model(raw_env, model)
         
         # Finish W&B run
         if wandb_config.mode != "disabled":

@@ -1,5 +1,5 @@
 # Main runs
-.PHONY: train train-ensemble inference inference-robust shapley counterfactual shapley-robust counterfactual-robust
+.PHONY: train train-ensemble ensemble-robust inference shapley counterfactual shapley-robust counterfactual-robust
 # other runs
 .PHONY : precursor precursor-robust interventional interventional-robust
 # Pipelines
@@ -9,28 +9,31 @@
 .PHONY : traj-ensemble policy-facing policy-facing-robust shapley-single counterfactual-single
 
 name ?= model
+# Training duration (env steps; 1 step = 1 month). Overridable per-invocation, and
+# set per-pipeline by train-quick / train-robust below.
+total_timesteps ?= 1200000
 
 train:
-	uv run scripts/train.py --epochs 1000 --name $(name)
-train-ensemble:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --epochs 1000 --no-wandb
+	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
+ensemble-quick:
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --no-wandb
+ensemble-robust:
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
 	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200
-inference-robust:
-	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 100 --months 1200
 
 # =============== X-AI methods ================
 shapley:
-	uv run scripts/analysis/shapley_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 6 --n-permutations 6 --months 1200 --no-wandb
+	uv run scripts/analysis/shapley_analysis.py --model $(name) --n-runs 6 --n-permutations 6 --months 1200 --no-wandb
 shapley-robust:
-	uv run scripts/analysis/shapley_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 30 --n-permutations 30 --months 1200 --no-wandb
+	uv run scripts/analysis/shapley_analysis.py --model $(name) --n-runs 30 --n-permutations 30 --months 1200 --no-wandb
 
 counterfactual:
-	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 20 --months 1200 --no-wandb
+	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 20 --months 1200 --no-wandb
 counterfactual-robust:
-	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 100 --months 1200 --no-wandb
+	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 100 --months 1200 --no-wandb
 
 # --- Agent-free causal backbone + 3-method convergence figure ---
 # interventional_xro is agent-free; --model is a label so its output files alongside the ensemble's so `convergence` can find all three npz inputs.
@@ -58,12 +61,15 @@ xai-robust:
 	$(MAKE) shapley-robust name=$(name)
 	$(MAKE) interventional-robust name=$(name)
 
+# quick = shorter training for fast pipeline validation/iteration + light inference.
+# robust = longer training for convergence (publication model) + heavy inference.
+# 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) train-ensemble name=$(name)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps)
 	$(MAKE) inference name=$(name)
 
 train-robust:
-	$(MAKE) train-ensemble name=$(name)
+	$(MAKE) ensemble-robust name=$(name)
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:

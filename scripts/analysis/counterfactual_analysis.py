@@ -6,7 +6,7 @@ Aggregates across independently trained seeds; saves results for notebook plotti
 
 Usage:
     uv run scripts/analysis/counterfactual_analysis.py --model ensemble \
-        --seeds 0 1 2 3 4 5 6 7 8 9 --n-runs 20 --months 1200
+        --n-runs 20 --months 1200
 """
 import sys
 import time
@@ -18,6 +18,7 @@ import wandb
 from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
+from utils.nb_helper import _fdr
 
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
@@ -29,6 +30,7 @@ from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
 from utils.results_io import save_csv
+from utils.seeding import discover_seeds
 from XRO.core import XRO
 
 METRIC_LABELS = {
@@ -127,7 +129,7 @@ def simulate_counterfactual(env, model, num_months, seed,
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
-    enso_history = [obs[0]]
+    enso_history = [env.state[0]]  # raw physical Nino3.4
 
     for step in range(num_months):
         action, _ = model.predict(obs, deterministic=True)
@@ -139,7 +141,7 @@ def simulate_counterfactual(env, model, num_months, seed,
 
         obs, reward, _, _, _ = env.step(action)
         total_reward += reward
-        enso_history.append(obs[0])
+        enso_history.append(env.state[0])
 
     classified = classify_enso_event(enso_history)
     phase = mye_fraction_by_phase(classified)
@@ -392,11 +394,22 @@ def run_ensemble(args, output_dir):
         save_kw[f'ci_{p}'] = ci
         save_kw[f'p_{p}'] = pvals
         save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
-        print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
-        order = np.argsort(mean)
-        for fi in order:
-            sig = "***" if pvals[fi] < 0.001 else "**" if pvals[fi] < 0.01 else "*" if pvals[fi] < 0.05 else "ns"
-            print(f"    {controllable[fi]:<10} {mean[fi]:+.4f} ± {ci[fi]:.4f}  {sig}")
+
+    # Benjamini-Hochberg across the WHOLE family (n_features x n_phases tests). One
+    # test per (mode, phase) means raw p overstates significance across the family.
+    _P = np.vstack([save_kw[f'p_{p}'] for p in phases])
+    _Q = _fdr(_P)
+    for _i, p in enumerate(phases):
+        save_kw[f'q_{p}'] = _Q[_i]
+        print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds, BH-FDR) ===")
+        for fi in np.argsort(save_kw[f'mean_{p}']):
+            q = _Q[_i, fi]
+            sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
+            print(f"    {controllable[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.4f} "
+                  f"± {save_kw[f'ci_{p}'][fi]:.4f}  p={save_kw[f'p_{p}'][fi]:.4f} "
+                  f"q={q:.4f}  {sig}")
+    print(f"\n  significant: raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
+          f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
     np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
@@ -408,7 +421,8 @@ def run_ensemble(args, output_dir):
             summary_rows.append({'phase': p, 'feature': feat,
                                  'mean_dP_MYE': float(save_kw[f'mean_{p}'][fi]),
                                  'ci95': float(save_kw[f'ci_{p}'][fi]),
-                                 'p': float(save_kw[f'p_{p}'][fi])})
+                                 'p': float(save_kw[f'p_{p}'][fi]),
+                                 'q_fdr': float(save_kw[f'q_{p}'][fi])})
             for si, s in enumerate(used):
                 per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feat,
                                       'dP_MYE': float(save_kw[f'per_seed_{p}'][si, fi])})
@@ -425,12 +439,16 @@ def main():
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
     parser.add_argument("--n-runs", type=int, default=20, help="Number of paired runs per seed")
     parser.add_argument("--seed", type=int, default=42, help="Master seed")
-    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)),
-                        help="Ensemble seeds")
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel workers (default: cpu_count - 2; use 1 for serial)")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     args = parser.parse_args()
+
+    # Ensemble members are always auto-detected from disk.
+    args.seeds = discover_seeds(args.model)
+    if not args.seeds:
+        raise SystemExit(f"No models found matching models/{args.model}_seed*.zip")
+    print(f"Auto-detected {len(args.seeds)} seed(s): {args.seeds}")
 
     suppress_warnings()
     out = Path("plots") / args.model / "counterfactual"

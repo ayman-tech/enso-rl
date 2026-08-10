@@ -15,7 +15,15 @@ from scipy.stats import t as t_dist
 # Phase keys, display labels, and plot colors used across every figure.
 PHASES       = ["total", "el_nino", "la_nina"]
 PHASE_LABELS = {"total": "Total MYE", "el_nino": "Multi-year El Niño", "la_nina": "Multi-year La Niña"}
-PHASE_COLORS = {"total": "#4878CF", "el_nino": "#D65F5F", "la_nina": "#5CB85C"}
+# One phase palette for the whole paper: El Nino is ALWAYS red, La Nina ALWAYS blue.
+PHASE_COLORS = {"total": "#6A3D9A", "el_nino": "#C1524E", "la_nina": "#4878CF"}
+
+# PHASE_COLORS: red and blue must mean El Nino and La Nina everywhere in the paper and
+METHOD_COLORS  = {"counterfactual": "#4D4D4D", "shapley": "#E08214",
+                  "interventional": "#01665E"}
+SIGN_COLORS    = {"pos": "#E08214", "neg": "#01665E"}   # sustain / brake
+NS_COLOR       = "#cccccc"                              # not significant, all figures
+DIVERGING_CMAP = "BrBG"                                 # signed heatmaps (not RdBu)
 XRO_MODES    = ["WWV", "NPMM", "SPMM", "IOB", "IOD", "SIOD", "TNA", "ATL3", "SASD"]
 SPINUP       = 12  # months skipped for seasonality binning (fixed by XRO env)
 
@@ -37,15 +45,70 @@ def _sig_stars(p):
     return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
 
 
-def _add_sig_labels(ax, x_positions, values, pvals, offset_frac=0.04):
-    """Annotate bar chart with significance stars."""
-    ylim = ax.get_ylim()
-    offset = (ylim[1] - ylim[0]) * offset_frac
-    for xi, val, p in zip(x_positions, values, pvals):
-        star = _sig_stars(p)
-        y = val + offset if val >= 0 else val - offset
-        va = "bottom" if val >= 0 else "top"
-        ax.text(xi, y, star, ha="center", va=va, fontsize=9, fontweight="bold")
+def _fdr(pvals):
+    """Benjamini-Hochberg FDR-adjusted p-values (q-values) for a whole test family.
+
+    The driver figures run one t-test per (mode, phase) -- 9 x 3 = 27 per analysis --
+    so raw p-values overstate significance across the family: at alpha=0.05 roughly one
+    of 27 is expected to pass by chance alone. BH controls the expected proportion of
+    false discoveries among the calls actually made, which is the right criterion here
+    (we want a reliable driver *set*, not protection against a single false positive,
+    which is what the far stricter Bonferroni gives).
+
+    Pass every p-value in the family AT ONCE -- all phases together, not phase by phase.
+    Correcting within a phase would leave the across-phase family uncontrolled.
+
+    Args:
+        pvals: array-like of raw p-values; shape is preserved in the return value.
+
+    Returns:
+        np.ndarray of q-values, same shape as `pvals`.
+    """
+    p = np.asarray(pvals, float)
+    flat = p.ravel()
+    n = flat.size
+    order = np.argsort(flat)
+    q = np.empty(n)
+    # BH step-up: q_(i) = min_{j >= i} ( n/j * p_(j) ), enforced by a reverse cumulative
+    # minimum so q stays monotone in p.
+    q[order] = np.minimum.accumulate(
+        (flat[order] * n / np.arange(1, n + 1))[::-1])[::-1]
+    return np.clip(q, 0.0, 1.0).reshape(p.shape)
+
+
+def _add_sig_labels(ax, x_positions, values, pvals, cis=None, offset_frac=0.05):
+    """Annotate a bar chart with significance stars, clear of the error whiskers.
+
+    Labels sit beyond the WHISKER TIP (value +/- ci), not the bar top. Placing them at
+    the bar top -- as this did previously -- drops the star on its own error bar
+    whenever the CI is wide, which is exactly the case where the reader most needs to
+    see both. Pass `cis` whenever the bars are drawn with `yerr`; omitting it falls
+    back to bar-top placement, so existing callers are unaffected.
+
+    The y-limits are widened to fit whatever was drawn, so labels are never clipped.
+
+    Args:
+        ax: target axes.
+        x_positions: bar x centres.
+        values: bar heights, in the same order.
+        pvals: p- (or q-) values used to pick the star, same order.
+        cis: half-width of each error bar, same order. None -> treated as zeros.
+        offset_frac: gap between whisker tip and label, as a fraction of the y-range.
+    """
+    values = np.asarray(values, float)
+    cis = np.zeros_like(values) if cis is None else np.abs(np.asarray(cis, float))
+    lo, hi = ax.get_ylim()
+    offset = (hi - lo) * offset_frac
+    ymin, ymax = lo, hi
+    for xi, val, p, ci in zip(x_positions, values, pvals, cis):
+        up = val >= 0
+        tip = val + ci if up else val - ci      # outer end of the whisker
+        y = tip + offset if up else tip - offset
+        ax.text(xi, y, _sig_stars(p), ha="center", va="bottom" if up else "top",
+                fontsize=9, fontweight="bold")
+        ymax = max(ymax, y + offset)            # headroom for the glyph itself
+        ymin = min(ymin, y - offset)
+    ax.set_ylim(ymin, ymax)
 
 
 def _mean_ci(arr):

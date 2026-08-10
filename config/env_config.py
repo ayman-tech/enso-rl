@@ -80,12 +80,16 @@ class EnvConfig:
         # fully rewarded but anything *longer than ever observed* is penalized.
         "duration_ceiling_el_nino": 24,
         "duration_ceiling_la_nina": 24,
-        "duration_penalty_rate": 0.7,  # per month beyond the phase ceiling (sharp brake)
+        "duration_penalty_rate": 0.7,  # slope per month beyond the phase ceiling
+        # Saturation cap for the over-persistence penalty. 
+        # Value-loss stability handled at critic (VecNormalize norm_reward + clip_range_vf).
+        "duration_penalty_cap": 5.0,
         # State-plausibility (Mahalanobis) penalty: catches *extreme/implausible
         # states* (e.g. Nino3.4 at -3 sigma, impossible mode combinations),
         # complementary to the duration brake above.
         "realism_penalty_weight": 0.05,
-        "realism_quantile": 0.95,  # chi-squared quantile (dof = n_modes) for activation
+        # Saturation cap for realism penalty (tanh ramp). Safety net for early-training extremes.
+        "realism_penalty_cap": 3.0,
     })
 
     # Data configuration

@@ -16,11 +16,38 @@ the other four stay pinned at the master — the standard "common random numbers
 attribution design. No SeedSequence spawning: each axis seed is just the override or
 the master, which keeps control direct and filenames legible.
 """
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Dict
 
 # Fixed axis order used for the bundle tuple and the model-name suffix.
 AXES = ("weight", "action", "shuffle", "init", "physics")
+
+
+def _seed_sort_key(s):
+    """Sort ints numerically first, then any string suffixes lexicographically."""
+    return (0, s, "") if isinstance(s, int) else (1, 0, str(s))
+
+
+def discover_seeds(model, models_dir="models"):
+    """Find ensemble seeds from existing {models_dir}/{model}_seed*.zip filenames.
+
+    Shared by the analysis scripts (inference / shapley / counterfactual) so they all
+    auto-detect the trained ensemble members instead of hard-coding a seed list. The
+    suffix after `_seed` is returned as an int when it is a plain integer (the ensemble
+    case, e.g. ensemble_seed3.zip), otherwise as the raw string (e.g. a sweep model's
+    0-0-0-0-3). Returns a sorted list (possibly empty if no matching models exist).
+    """
+    seeds = []
+    pat = re.compile(rf"{re.escape(model)}_seed(.+)")
+    for p in sorted(Path(models_dir).glob(f"{model}_seed*.zip")):
+        m = pat.fullmatch(p.stem)
+        if not m:
+            continue
+        tok = m.group(1)
+        seeds.append(int(tok) if tok.lstrip("-").isdigit() else tok)
+    return sorted(seeds, key=_seed_sort_key)
 
 
 @dataclass
