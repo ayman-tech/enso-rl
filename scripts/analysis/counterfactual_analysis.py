@@ -18,6 +18,7 @@ import wandb
 from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
+from utils.nb_helper import _fdr
 
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
@@ -393,11 +394,22 @@ def run_ensemble(args, output_dir):
         save_kw[f'ci_{p}'] = ci
         save_kw[f'p_{p}'] = pvals
         save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
-        print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds) ===")
-        order = np.argsort(mean)
-        for fi in order:
-            sig = "***" if pvals[fi] < 0.001 else "**" if pvals[fi] < 0.01 else "*" if pvals[fi] < 0.05 else "ns"
-            print(f"    {controllable[fi]:<10} {mean[fi]:+.4f} ± {ci[fi]:.4f}  {sig}")
+
+    # Benjamini-Hochberg across the WHOLE family (n_features x n_phases tests). One
+    # test per (mode, phase) means raw p overstates significance across the family.
+    _P = np.vstack([save_kw[f'p_{p}'] for p in phases])
+    _Q = _fdr(_P)
+    for _i, p in enumerate(phases):
+        save_kw[f'q_{p}'] = _Q[_i]
+        print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds, BH-FDR) ===")
+        for fi in np.argsort(save_kw[f'mean_{p}']):
+            q = _Q[_i, fi]
+            sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
+            print(f"    {controllable[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.4f} "
+                  f"± {save_kw[f'ci_{p}'][fi]:.4f}  p={save_kw[f'p_{p}'][fi]:.4f} "
+                  f"q={q:.4f}  {sig}")
+    print(f"\n  significant: raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
+          f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
     np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
@@ -409,7 +421,8 @@ def run_ensemble(args, output_dir):
             summary_rows.append({'phase': p, 'feature': feat,
                                  'mean_dP_MYE': float(save_kw[f'mean_{p}'][fi]),
                                  'ci95': float(save_kw[f'ci_{p}'][fi]),
-                                 'p': float(save_kw[f'p_{p}'][fi])})
+                                 'p': float(save_kw[f'p_{p}'][fi]),
+                                 'q_fdr': float(save_kw[f'q_{p}'][fi])})
             for si, s in enumerate(used):
                 per_seed_rows.append({'phase': p, 'seed': int(s), 'feature': feat,
                                       'dP_MYE': float(save_kw[f'per_seed_{p}'][si, fi])})

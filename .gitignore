@@ -10,6 +10,9 @@ trajectory_analysis.csv
 logs/
 .DS_Store
 temp.txt
+docs/
+paper/
+figs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
