@@ -3,7 +3,6 @@ Data processing utilities for ENSO RL project.
 """
 import xarray as xr
 import numpy as np
-from config.env_config import EnvConfig
 
 
 def load_observational_data(data_path: str, train_start: str, train_end: str):
@@ -33,7 +32,30 @@ def load_observational_data(data_path: str, train_start: str, train_end: str):
     return obs_ds, train_ds, var_names, bounds
 
 
-def prepare_xro_parameters(model, train_ds, var_names, bounds):
+def calculate_state_bounds(train_ds, var_names, bounds_scale=1.0):
+    """Return state bounds derived from observations and widened exactly once.
+
+    Bounds are always recomputed from ``train_ds`` so callers cannot accidentally
+    pass an already-widened dictionary and compound ``bounds_scale``.
+    """
+    if bounds_scale < 1.0:
+        raise ValueError("bounds_scale must be >= 1.0 (1.0 = observed envelope)")
+
+    observed_bounds = {
+        var: (float(train_ds[var].data.min()), float(train_ds[var].data.max()))
+        for var in var_names
+    }
+    if bounds_scale == 1.0:
+        return observed_bounds
+
+    return {
+        var: ((lo + hi) / 2 - bounds_scale * (hi - lo) / 2,
+              (lo + hi) / 2 + bounds_scale * (hi - lo) / 2)
+        for var, (lo, hi) in observed_bounds.items()
+    }
+
+
+def prepare_xro_parameters(model, train_ds, var_names, *, config):
     """
     Prepare parameters for XRO physics function.
     
@@ -41,14 +63,15 @@ def prepare_xro_parameters(model, train_ds, var_names, bounds):
         model: Fitted XRO model
         train_ds: Training dataset (xarray)
         var_names (list): Variable names
-        bounds (dict): Bounds for each variable
+        config (EnvConfig): Configuration supplying action_scale, reward_config,
+            clip_mode and bounds_scale. It is required so caller overrides cannot
+            be silently replaced by a fresh default configuration.
         
     Returns:
         dict: Parameters dictionary with model, fit_ds, noise_cov, etc.
     """
     
     # Fit the model
-    config = EnvConfig()
     fitted_params = model.fit_matrix(
         train_ds,
         maskb=["IOD"],
@@ -68,6 +91,10 @@ def prepare_xro_parameters(model, train_ds, var_names, bounds):
         fitted_params.roll(cycle=-m, roll_coords=False) for m in range(12)
     ]
 
+    # Derive the observed envelope here, then widen it exactly once. Keeping bound
+    # ownership in this function prevents compounding when constructing variants.
+    bounds = calculate_state_bounds(train_ds, var_names, config.bounds_scale)
+
     # Create params dictionary
     params = {
         'model': model,
@@ -76,6 +103,7 @@ def prepare_xro_parameters(model, train_ds, var_names, bounds):
         'noise_cov': noise_cov,
         'var_names': var_names,
         'bounds': bounds,
+        'clip_mode': config.clip_mode,
         'dt': 1.0 / 12.0,
         'action_scale': config.action_scale,
         'reward_config': config.reward_config,

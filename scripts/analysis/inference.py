@@ -9,6 +9,7 @@ without re-running simulation.
 Output: plots/{model}/inference.npz
 
 npz arrays:
+  schema_version      scalar (=2)               see utils.nb_helper.load_inference
   var_names           [10]                      XRO mode names (Nino3.4 … SASD)
   action_names        [9]                       forcing mode names (var_names[1:])
   seeds               [n_seeds]                 model seed indices used
@@ -22,8 +23,22 @@ npz arrays:
   spinup              scalar (=12)              months to skip for seasonality binning
 
   agent_obs           [n_seeds, n_rollouts, T, 10]  full state after each step
-  agent_actions       [n_seeds, n_rollouts, T, 9]   scaled forcing applied
+  agent_actions       [n_seeds, n_rollouts, T, 9]   forcing applied, in each mode's
+                                                 physical units
+  agent_actions_raw   [n_seeds, n_rollouts, T, 9]   policy output, in [-1, 1]
   agent_mye_label     [n_seeds, n_rollouts, T]       int8 MYE category (see below)
+
+Action scaling invariant (schema v2):
+  agent_actions[s, r, t, m]
+      == agent_actions_raw[s, r, t, m]
+         * action_scale[m, (t + rollout_start_month[s, r]) % 12]
+
+  reset() starts the seasonal clock at the SAMPLED state's calendar month, so the
+  scale column is the TRUE calendar month, NOT t % 12. Schema v1 files used t % 12
+  and are wrong for the ~90% of rollouts that do not start in January; read every
+  inference.npz through utils.nb_helper.load_inference, which rejects them.
+  Consumers wanting effort comparable across modes should use agent_actions_raw --
+  no unscaling by hand.
 
   base_obs            [n_seeds, n_rollouts, T, 10]  baseline (no agent) state
   base_mye_label      [n_seeds, n_rollouts, T]
@@ -67,6 +82,8 @@ from utils.evaluation import simulate_trajectory
 from utils import suppress_warnings
 from utils.seeding import discover_seeds
 from config import EnvConfig
+
+from utils.nb_helper import INFERENCE_SCHEMA
 
 SPINUP = 12  # months to skip as transient at the start of each rollout. NOTE: reset()
              # starts the seasonal clock at the sampled state's calendar month (not Jan),
@@ -119,6 +136,7 @@ def _worker_seed(wargs):
     n_r = len(r_seeds)
     a_obs = np.zeros((n_r, T, 10), dtype=np.float32)
     a_act = np.zeros((n_r, T,  9), dtype=np.float32)
+    a_raw = np.zeros((n_r, T,  9), dtype=np.float32)
     a_mye = np.zeros((n_r, T),     dtype=np.int8)
     b_obs = np.zeros((n_r, T, 10), dtype=np.float32)
     b_mye = np.zeros((n_r, T),     dtype=np.int8)
@@ -129,6 +147,7 @@ def _worker_seed(wargs):
         sim_b = simulate_trajectory(env, agent=None,  num_months=T, seed=rs)
         a_obs[ri] = sim_a['states_traj'][1:].astype(np.float32)
         a_act[ri] = sim_a['actions_traj'].astype(np.float32)
+        a_raw[ri] = sim_a['raw_actions_traj'].astype(np.float32)
         a_mye[ri] = _encode_classified(sim_a['classified_event_array'])
         b_obs[ri] = sim_b['states_traj'][1:].astype(np.float32)
         b_mye[ri] = _encode_classified(sim_b['classified_event_array'])
@@ -138,7 +157,7 @@ def _worker_seed(wargs):
     af = (a_mye >= 3).mean() * 100
     bf = (b_mye >= 3).mean() * 100
     print(f"  [seed {seed}] done — agent={af:.1f}%  base={bf:.1f}%  lift={af-bf:+.1f}%", flush=True)
-    return si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye, a_start
+    return si, seed, vnames, a_obs, a_act, a_raw, a_mye, b_obs, b_mye, a_start
 
 
 def main():
@@ -150,6 +169,17 @@ def main():
     parser.add_argument("--months",      type=int, default=1200,
                         help="Simulation months per rollout (T)")
     parser.add_argument("--master-seed", type=int, default=42)
+    parser.add_argument("--bounds-scale", type=float, default=None,
+                        help="State-bound multiplier used to train the model")
+    parser.add_argument("--clip-mode",   type=str, default=None,
+                        choices=("both", "pre", "post", "none"),
+                        help="State safety clip used to train the model. Defaults to "
+                             "EnvConfig.clip_mode. Models trained before clip_mode "
+                             "existed (model4..model10) need --clip-mode both "
+                             "--bounds-scale 1.0 to reproduce their rollouts.")
+    parser.add_argument("--out",         type=str, default=None,
+                        help="Output npz path (default: plots/{model}/inference.npz). "
+                             "Use it to write a verification run without clobbering.")
     parser.add_argument("--workers",     type=int, default=None,
                         help="Parallel seeds at once (default: cpu_count - 2; use 1 "
                              "for serial). Mirrors shapley/counterfactual_analysis; "
@@ -167,9 +197,16 @@ def main():
 
     output_dir = Path("plots") / args.model
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / "inference.npz"
+    out_path = Path(args.out) if args.out else output_dir / "inference.npz"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     env_config = EnvConfig()
+    if args.bounds_scale is not None:
+        if args.bounds_scale < 1.0:
+            parser.error("--bounds-scale must be >= 1.0")
+        env_config.bounds_scale = args.bounds_scale
+    if args.clip_mode is not None:
+        env_config.clip_mode = args.clip_mode
     master_rng = np.random.default_rng(args.master_seed)
 
     print("=" * 60)
@@ -179,6 +216,8 @@ def main():
     print(f"  seeds      = {valid_seeds}")
     print(f"  n_rollouts = {args.n_rollouts}")
     print(f"  months     = {args.months}")
+    print(f"  clip_mode  = {env_config.clip_mode}")
+    print(f"  bounds     = {env_config.bounds_scale}x")
     print(f"  output     = {out_path}")
     print()
 
@@ -189,6 +228,7 @@ def main():
     # Pre-allocate
     agent_obs       = np.zeros((n_seeds, n_r, T, 10), dtype=np.float32)
     agent_actions   = np.zeros((n_seeds, n_r, T,  9), dtype=np.float32)
+    agent_actions_raw = np.zeros((n_seeds, n_r, T, 9), dtype=np.float32)
     agent_mye_label = np.zeros((n_seeds, n_r, T),     dtype=np.int8)
     base_obs        = np.zeros((n_seeds, n_r, T, 10), dtype=np.float32)
     base_mye_label  = np.zeros((n_seeds, n_r, T),     dtype=np.int8)
@@ -220,11 +260,12 @@ def main():
 
     # Assemble per-seed results into the pre-allocated arrays (by seed index).
     var_names = None
-    for si, seed, vnames, a_obs, a_act, a_mye, b_obs, b_mye, a_start in results:
+    for si, seed, vnames, a_obs, a_act, a_raw, a_mye, b_obs, b_mye, a_start in results:
         if var_names is None:
             var_names = vnames
         agent_obs[si]       = a_obs
         agent_actions[si]   = a_act
+        agent_actions_raw[si] = a_raw
         agent_mye_label[si] = a_mye
         base_obs[si]        = b_obs
         base_mye_label[si]  = b_mye
@@ -234,6 +275,7 @@ def main():
 
     np.savez(
         out_path,
+        schema_version=INFERENCE_SCHEMA,
         var_names=np.array(var_names),
         action_names=np.array(list(var_names[1:])),
         seeds=np.array(valid_seeds),
@@ -242,8 +284,11 @@ def main():
         n_rollouts=n_r,
         months=T,
         spinup=SPINUP,
+        bounds_scale=env_config.bounds_scale,
+        clip_mode=env_config.clip_mode,
         agent_obs=agent_obs,
         agent_actions=agent_actions,
+        agent_actions_raw=agent_actions_raw,
         agent_mye_label=agent_mye_label,
         base_obs=base_obs,
         base_mye_label=base_mye_label,

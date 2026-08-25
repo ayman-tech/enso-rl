@@ -47,7 +47,10 @@ def plot_control_actions(actions_traj, var_names, num_months=None, wandb_enabled
     Plot control actions for each variable.
     
     Args:
-        actions_traj (array): Actions trajectory (num_steps x num_actions)
+        actions_traj (array): Actions trajectory (num_steps x num_actions). Pass either
+            sim['actions_traj'] (applied forcing, each mode in its own physical units --
+            not comparable across modes) or sim['raw_actions_traj'] (policy output in
+            [-1, 1], comparable across modes). Label the y-axis accordingly.
         var_names (list): Variable names (including Nino34)
         num_months (int): Total number of months
         wandb_enabled (bool): Log to W&B
@@ -334,7 +337,10 @@ def plot_action_kde_by_event(actions_traj, classified_event_array, var_names, wa
     Plot kernel density estimates for each action variable, grouped by ENSO event type.
     
     Args:
-        actions_traj (array): Actions trajectory (num_steps x num_actions)
+        actions_traj (array): Actions trajectory (num_steps x num_actions). Prefer
+            sim['raw_actions_traj']: pooling months of applied forcing mixes the 12
+            monthly action scales into one density, which a KDE renders as spurious
+            structure.
         classified_event_array (array): Month-by-month event classifications
         var_names (list): Variable names (including Nino34)
         wandb_enabled (bool): Log to W&B

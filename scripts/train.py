@@ -70,7 +70,7 @@ def setup_environment(config: EnvConfig):
     # Prepare XRO parameters
     print("\n2. Preparing XRO model...")
     model = XRO()
-    params = prepare_xro_parameters(model, train_ds, var_names, bounds)
+    params = prepare_xro_parameters(model, train_ds, var_names, config=config)
     params['threshold'] = config.threshold
     print("   [OK] XRO model fitted and parameters extracted")
     
@@ -102,6 +102,8 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
         "action_space_dim": env_config.action_dim,
         "observation_space_dim": env_config.obs_dim,
         "action_scale": env_config.action_scale,
+        "bounds_scale": env_config.bounds_scale,
+        "clip_mode": env_config.clip_mode,
         "enso_threshold": env_config.threshold,
         "debug_mode": train_config.debug_mode,
         "learning_rate": train_config.learning_rate,
@@ -303,6 +305,8 @@ def main():
                         help="Override total training timesteps (env steps for model.learn)")
     parser.add_argument("--max-episode-steps", type=int, default=None,
                         help="Override episode length (months); resets every this many steps")
+    parser.add_argument("--bounds-scale", type=float, default=None,
+                        help="State-bound multiplier (1.0 = observed envelope)")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--seed", type=int, default=None,
                         help="Master random seed. By default every randomness axis "
@@ -331,6 +335,10 @@ def main():
         train_config.total_timesteps = args.total_timesteps
     if args.max_episode_steps is not None:
         train_config.max_episode_steps = args.max_episode_steps
+    if args.bounds_scale is not None:
+        if args.bounds_scale < 1.0:
+            parser.error("--bounds-scale must be >= 1.0")
+        env_config.bounds_scale = args.bounds_scale
     if args.lr:
         train_config.learning_rate = args.lr
     if args.no_wandb:
@@ -416,7 +424,7 @@ def main():
         model = train_ppo_agent(env, train_config, wandb_config, seeds, eval_env=eval_env)
         
         # Evaluate on the unwrapped env (gym API + env.state/env.threshold)
-        evaluate_trained_model(raw_env, model)
+        evaluate_trained_model(raw_env, model, eval_steps=train_config.eval_steps)
         
         # Finish W&B run
         if wandb_config.mode != "disabled":

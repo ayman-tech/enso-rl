@@ -41,7 +41,6 @@ from stable_baselines3 import PPO
 from config import EnvConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.evaluation import evaluate_agent, simulate_trajectory
-from scripts.analysis.lift_analysis import run_lift_evaluation
 from utils.visualization import (
     plot_control_actions, plot_state_variables,
     plot_robust_interventional, plot_nino_classification,
@@ -96,7 +95,8 @@ def load_environment(model_path: str, env_config: EnvConfig):
     # Prepare XRO parameters
     print("Preparing XRO model...")
     model_xro = XRO()
-    params = prepare_xro_parameters(model_xro, train_ds, var_names, bounds)
+    params = prepare_xro_parameters(model_xro, train_ds, var_names,
+                                    config=env_config)
     params['threshold'] = env_config.threshold
     
     # Create environment
@@ -117,7 +117,8 @@ def load_environment(model_path: str, env_config: EnvConfig):
     return model, env, var_names
 
 
-def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False):
+def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False,
+                         seed=None):
     """
     Run basic evaluation comparing agent vs baseline.
     
@@ -135,10 +136,12 @@ def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False):
     print("="*70)
     
     print(f"\nEvaluating agent performance over {num_months} months...")
-    prob_with_agent = evaluate_agent(env, agent=model, continuous_steps=num_months)
+    prob_with_agent = evaluate_agent(env, agent=model, continuous_steps=num_months,
+                                     seed=seed)
     
     print(f"Evaluating baseline (zero actions)...")
-    prob_baseline = evaluate_agent(env, agent=None, continuous_steps=num_months)
+    prob_baseline = evaluate_agent(env, agent=None, continuous_steps=num_months,
+                                   seed=seed)
     
     improvement = (prob_with_agent - prob_baseline) * 100
     ratio = prob_with_agent / prob_baseline if prob_baseline > 0 else 1.0
@@ -322,7 +325,8 @@ def run_interventional_analysis(model, env, var_names, disable_idx=None, num_mon
     return delta_r_values
 
 
-def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5, wandb_enabled=False, model_name="model"):
+def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5,
+                            wandb_enabled=False, model_name="model", seed=None):
     """
     Run trajectory analysis and visualization.
 
@@ -351,7 +355,8 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
         env, 
         agent=model, 
         num_months=num_months,
-        debug_mode=True
+        debug_mode=True,
+        seed=seed,
     )
     
     print(f"\nSimulation Results:")
@@ -378,10 +383,12 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
         'enso_index': sim['enso_traj'][:-1], # remove last to match len(action)
     })
     
-    # Add actions
+    # Add actions. 'action_*' is the forcing applied in each mode's physical units
+    # (scaled at the TRUE calendar month); 'action_raw_*' is the policy output in [-1, 1].
     for i, var_name in enumerate(var_names[1:]):
         if i < sim['actions_traj'].shape[1]:
             trajectory_df[f'action_{var_name}'] = sim['actions_traj'][:, i]
+            trajectory_df[f'action_raw_{var_name}'] = sim['raw_actions_traj'][:, i]
     
     # Add states
     for i, var_name in enumerate(var_names):
@@ -434,6 +441,8 @@ def main():
     parser.add_argument("--months", type=int, default=1200, help="Simulation months per run")
     parser.add_argument("--n-runs", type=int, default=30, help="Number of paired trials for interventional analysis")
     parser.add_argument("--master-seed", type=int, default=42, help="Master random seed")
+    parser.add_argument("--bounds-scale", type=float, default=None,
+                        help="State-bound multiplier used to train the model")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     args = parser.parse_args()
     
@@ -453,6 +462,10 @@ def main():
         
         # Load environment
         env_config = EnvConfig()
+        if args.bounds_scale is not None:
+            if args.bounds_scale < 1.0:
+                parser.error("--bounds-scale must be >= 1.0")
+            env_config.bounds_scale = args.bounds_scale
         model, env, var_names = load_environment(args.model, env_config)
         
         # Initialize W&B (enabled by default)
@@ -482,7 +495,22 @@ def main():
         
         # Run evaluations
         if args.all or args.basic:
-            run_basic_evaluation(model, env, num_months=args.months, wandb_enabled=wandb_enabled)
+            basic_results = run_basic_evaluation(
+                model, env, num_months=args.months, wandb_enabled=wandb_enabled,
+                seed=args.master_seed)
+            output_dir = Path("plots") / args.model
+            output_dir.mkdir(parents=True, exist_ok=True)
+            np.savez(
+                output_dir / "basic_evaluation.npz",
+                months=args.months,
+                master_seed=args.master_seed,
+                bounds_scale=env_config.bounds_scale,
+                clip_mode=env_config.clip_mode,
+                mye_agent=basic_results['evaluation/multi_year_events_with_agent'],
+                mye_baseline=basic_results['evaluation/multi_year_events_without_agent'],
+                lift=basic_results['evaluation/improvement_percentage_points'],
+            )
+            print(f"[OK] Basic results saved to {output_dir / 'basic_evaluation.npz'}")
 
         if args.all or args.intervention:
             run_interventional_analysis(model, env, var_names, num_months=args.months,
@@ -493,11 +521,18 @@ def main():
             run_trajectory_analysis(
                 model, env, var_names, num_months=args.months, 
                 threshold=env_config.threshold, wandb_enabled=wandb_enabled, 
-                model_name=args.model)
+                model_name=args.model, seed=args.master_seed)
 
         if args.all or args.lift:
             # Phase-resolved MYE lift (1.1, 1.2). Logs into THIS evaluate run's
             # wandb (run_lift_evaluation does not init/finish its own run).
+            try:
+                from scripts.analysis.lift_analysis import run_lift_evaluation
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "--lift requires scripts/analysis/lift_analysis.py, which is not "
+                    "present in this checkout"
+                ) from exc
             run_lift_evaluation(model, env, n_rollouts=args.n_rollouts,
                                 months=args.months, master_seed=args.master_seed,
                                 label=args.model, wandb_log=wandb_enabled)

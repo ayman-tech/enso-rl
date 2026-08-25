@@ -146,6 +146,7 @@ class XROMultiYearEnv(gym.Env):
         random_year = self.rng_init.integers(1979, 2023)
         random_month = self.rng_init.integers(1, 13)
         self.state = np.array(get_data(self.train_ds, self.var_names, random_year, random_month), dtype=np.float32)
+        self.state_unclipped = self.state.copy()   # no dynamics have run yet
 
         # Align the seasonal clock to the sampled state's real calendar month so
         # the state evolves under its true season (e.g. an August state advances
@@ -192,8 +193,11 @@ class XROMultiYearEnv(gym.Env):
         """
         # Step the model. Pass the season-aligned calendar index so the XRO
         # seasonal parameters match the state's real month (see month_offset).
+        _diag = {}
         self.state = xro_step(self.state, self.params, action, self.rng_physics,
-                              self.current_step + self.month_offset)
+                              self.current_step + self.month_offset, diag=_diag)
+        # Raw dynamics output before the safety clip (one-step overshoot diagnostic).
+        self.state_unclipped = _diag.get('pre_clip_state', self.state).copy()
         self.enso_history.append(self.state[0])
         self.current_step += 1
         

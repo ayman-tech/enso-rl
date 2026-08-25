@@ -65,7 +65,7 @@ def build_env():
         cfg.data_config['train_start'],
         cfg.data_config['train_end'])
     model_xro = XRO()
-    params = prepare_xro_parameters(model_xro, train_ds, var_names, bounds)
+    params = prepare_xro_parameters(model_xro, train_ds, var_names, config=cfg)
     params['threshold'] = cfg.threshold
     env = XROMultiYearEnv(params=params, train_ds=train_ds,
                           var_names=var_names, max_steps=cfg.max_steps)

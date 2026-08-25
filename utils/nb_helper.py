@@ -8,6 +8,7 @@ Imported by both:
 Keeping these here avoids duplicating the setup logic across the two notebooks.
 """
 import warnings
+from pathlib import Path
 
 import numpy as np
 from scipy.stats import t as t_dist
@@ -118,9 +119,91 @@ def _mean_ci(arr):
     return arr.mean(), ci
 
 
+# --- Figure output ---------------------------------------------------------
+# Every figure in this project is LINE ART (lines, bars, fill_between, small
+# scatters, text). Vector output stays sharp at any zoom; a 300-dpi raster does not,
+# and reviewers zoom. PDF is therefore the submission format.
+#
+# pdf.fonttype: matplotlib defaults to 3 (Type 3), which many journal production
+# systems reject and some viewers render badly. 42 = TrueType, which is what you want.
+# This is the single setting that makes a PDF switch worth doing.
+SAVE_FORMATS = ("pdf",)   # PDF only -- paper/results.tex references figs/*.pdf.
+                          # Add "png" here if you want raster previews alongside.
+
+PAPER_RC = {
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "savefig.bbox": "tight",
+    "savefig.dpi": 300,     # only affects PNG and any rasterized artist
+}
+
+
+def apply_paper_style(**overrides):
+    """Apply the publication rcParams (call once in a notebook's setup cell)."""
+    import matplotlib.pyplot as plt
+    rc = dict(PAPER_RC)
+    rc.update(overrides)
+    plt.rcParams.update(rc)
+    return rc
+
+
+def save_fig(fig, path, formats=SAVE_FORMATS, **kwargs):
+    """Save `fig` once per format, vector first.
+
+    `path` may carry any extension (or none) -- it is replaced per format, so call
+    sites can keep their existing '...png' paths unchanged.
+
+    Font types are forced here rather than relying on the notebook's setup cell,
+    so a figure can never be written with Type 3 fonts by accident.
+    """
+    import matplotlib as mpl
+    mpl.rcParams["pdf.fonttype"] = 42
+    mpl.rcParams["ps.fonttype"] = 42
+
+    path = Path(path)
+    kwargs.setdefault("bbox_inches", "tight")
+    kwargs.setdefault("dpi", 300)
+
+    written = []
+    for ext in formats:
+        out = path.with_suffix(f".{ext}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, **kwargs)
+        written.append(out)
+    return written
+
+
 def _load_npz(path):
     """Load npz and return as a dict-like NpzFile (supports 'key in d.files')."""
     return np.load(path, allow_pickle=True)
+
+
+# inference.npz schema. Bumped to 2 when the month-offset action bug was fixed:
+#   v1 -- 'agent_actions' scaled by step % 12 (WRONG for any rollout not starting in
+#         January, i.e. ~90% of them); no 'agent_actions_raw'.
+#   v2 -- 'agent_actions' scaled at the TRUE calendar month (step + rollout_start_month)
+#         % 12, and 'agent_actions_raw' (policy output in [-1, 1]) stored alongside.
+INFERENCE_SCHEMA = 2
+
+
+def load_inference(path, require=INFERENCE_SCHEMA):
+    """Load inference.npz, refusing schema versions with the month-offset action bug.
+
+    The dangerous direction is an old npz read by a migrated notebook: the actions
+    would be silently mis-scaled and every conditional average (event composites,
+    per-phase KDEs) would be biased by up to ~20%. Fail loudly instead.
+    """
+    d = np.load(path, allow_pickle=True)
+    version = int(d['schema_version']) if 'schema_version' in d.files else 1
+    if version < require:
+        raise ValueError(
+            f"{path} is inference.npz schema v{version}, need v{require}.\n"
+            f"  v1 scaled 'agent_actions' by step % 12 instead of the true calendar "
+            f"month, and has no 'agent_actions_raw'.\n"
+            f"  Regenerate it:  uv run scripts/analysis/inference.py --model <name>\n"
+            f"  (models predating clip_mode need --clip-mode both --bounds-scale 1.0)"
+        )
+    return d
 
 
 def _median_iqr(arr, axis=0):

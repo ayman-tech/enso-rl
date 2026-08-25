@@ -64,7 +64,8 @@ def load_environment(model_path: str, env_config: EnvConfig):
     )
 
     model_xro = XRO()
-    params = prepare_xro_parameters(model_xro, train_ds, var_names, bounds)
+    params = prepare_xro_parameters(model_xro, train_ds, var_names,
+                                    config=env_config)
     params['threshold'] = env_config.threshold
 
     env = XROMultiYearEnv(

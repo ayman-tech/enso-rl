@@ -25,7 +25,9 @@ import numpy as np
 from pathlib import Path
 from scipy import stats as sp_stats
 
-repo_root = Path(__file__).parent.parent
+# scripts/analysis/mutual_information.py -> three levels up is the repo root
+# (was two, which pointed at scripts/ and made `import config` fail).
+repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
@@ -33,6 +35,7 @@ from config import EnvConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
+from utils.evaluation import simulate_trajectory
 from XRO.core import XRO
 
 
@@ -55,7 +58,8 @@ def load_environment(model_path: str, env_config: EnvConfig):
     )
 
     model_xro = XRO()
-    params = prepare_xro_parameters(model_xro, train_ds, var_names, bounds)
+    params = prepare_xro_parameters(model_xro, train_ds, var_names,
+                                    config=env_config)
     params['threshold'] = env_config.threshold
 
     env = XROMultiYearEnv(
@@ -67,38 +71,35 @@ def load_environment(model_path: str, env_config: EnvConfig):
     return model, env, var_names
 
 
-def collect_single_trajectory(env, model, num_months, seed, action_scale_matrix):
+def collect_single_trajectory(env, model, num_months, seed):
     """
     Collect actions and Nino3.4 values from a single trajectory.
+
+    Delegates to the shared recorder so the month-indexed action scaling has exactly
+    one implementation (utils.actions). The hand-rolled loop this replaced carried two
+    bugs:
+      1. it scaled actions by `step % 12`, ignoring env.month_offset -- wrong for the
+         ~90% of rollouts that do not start in January;
+      2. it read Nino3.4 from `obs_next[0]`, which is the Z-SCORED observation
+         (XROMultiYearEnv._get_obs), and then classified it against a threshold in raw
+         degC. With the ORAS5 climatology (mean -0.0232, std 0.8887) that made the
+         effective thresholds +0.421 / -0.468 degC -- asymmetric, and not +/-0.5.
+         states_traj carries env.state, which is raw.
 
     Args:
         env: Environment
         model: Trained PPO model
         num_months: Months to simulate
         seed: Random seed for env.reset()
-        action_scale_matrix: Action scaling matrix [9, 12] (variables x months)
 
     Returns:
-        actions: [num_months, 9] scaled actions
-        nino34: [num_months] Nino3.4 observations
+        actions: [num_months, 9] RAW policy actions in [-1, 1]
+        nino34:  [num_months] raw Nino3.4 (degC)
     """
-    obs, _ = env.reset(seed=seed)
-    actions = []
-    nino34_vals = []
-
-    for step in range(num_months):
-        action, _ = model.predict(obs, deterministic=True)
-        obs_next, reward, terminated, truncated, info = env.step(action)
-
-        current_month = step % 12
-        action_scale = action_scale_matrix[:, current_month]
-        scaled_action = action * action_scale
-        actions.append(scaled_action)
-        nino34_vals.append(obs_next[0])  # Nino3.4 is first obs
-
-        obs = obs_next
-
-    return np.array(actions), np.array(nino34_vals)
+    sim = simulate_trajectory(env, agent=model, num_months=num_months, seed=seed)
+    # states_traj is [T+1, 10] with the initial state prepended, so [1:] aligns index
+    # t with action t (same convention as scripts/analysis/inference.py).
+    return sim['raw_actions_traj'], sim['states_traj'][1:, 0]
 
 
 def classify_nino34(nino34, threshold=0.5):
@@ -194,26 +195,31 @@ def compute_mi_for_trajectory(actions, nino34, lag, threshold=0.5, n_bins=20):
     return mi_values
 
 
-def compute_mi_for_run(env, model, num_months, seed, action_scale, lags, threshold, n_bins):
+def compute_mi_for_run(env, model, num_months, seed, lags, threshold, n_bins):
     """
     Compute MI at multiple lags for a single independent run.
+
+    MI is computed on RAW actions. MI is invariant to a *fixed* monotone transform,
+    but the per-month action scale is month-DEPENDENT, so pooling 1200 months of
+    scaled forcing mixes 12 different stretches into one set of histogram bins and
+    MI(scaled) != MI(raw). Raw is also unit-free, so the 9 modes -- whose scales
+    differ by ~10x -- are directly comparable.
 
     Args:
         env: Environment
         model: Trained model
         num_months: Months per trajectory
         seed: Random seed
-        action_scale: Action scaling array
         lags: List of lag values
         threshold: ENSO classification threshold
         n_bins: Histogram bins
 
     Returns:
         lag_profiles: [n_lags, 9] MI values at each lag
-        actions: [T, 9] trajectory actions
-        nino34: [T] trajectory Nino3.4
+        actions: [T, 9] raw trajectory actions in [-1, 1]
+        nino34: [T] trajectory Nino3.4 (raw degC)
     """
-    actions, nino34 = collect_single_trajectory(env, model, num_months, seed, action_scale)
+    actions, nino34 = collect_single_trajectory(env, model, num_months, seed)
 
     lag_profiles = np.zeros((len(lags), actions.shape[1]))
     for i, lag in enumerate(lags):
@@ -283,7 +289,6 @@ def main():
 
     env_config = EnvConfig()
     model, env, var_names = load_environment(args.model, env_config)
-    action_scale = np.array(env_config.action_scale)  # shape: (9, 12)
     action_names = list(var_names[1:])
     n_actions = len(action_names)
 
@@ -305,7 +310,7 @@ def main():
         print(f"--- Run {run_idx+1}/{args.n_runs} (seed={seed}) ---")
 
         lag_profiles, actions, nino34 = compute_mi_for_run(
-            env, model, args.months, seed, action_scale,
+            env, model, args.months, seed,
             args.lags, args.threshold, args.n_bins
         )
         mi_per_run_all_lags[run_idx] = lag_profiles
@@ -359,6 +364,11 @@ def main():
     # Save results
     np.savez(
         output_dir / 'mi_results.npz',
+        # v2: MI computed on RAW actions against RAW Nino3.4. v1 used step%12-scaled
+        # actions and the Z-SCORED Nino3.4 thresholded in raw degC -- see
+        # collect_single_trajectory. v1 numbers are not comparable to these.
+        schema_version=2,
+        actions='raw',
         mi_per_run_all_lags=mi_per_run_all_lags,
         mi_primary_per_run=mi_primary_per_run,
         mean_lag_profiles=mean_lag_profiles,

@@ -4,8 +4,10 @@ Physics simulation functions for XRO climate model.
 import numpy as np
 import xarray as xr
 
+from utils.actions import calendar_month, scale_for_step
 
-def xro_step(state, params, action, rng, step_idx, xro_debug=False):
+
+def xro_step(state, params, action, rng, step_idx, xro_debug=False, diag=None):
     """
     Adds Action (Tuned) to the state and advances the XRO model by one month 
     using model.simulate().
@@ -17,12 +19,20 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
         rng: Random number generator
         step_idx (int): Step index to determine current month
         xro_debug (bool): If True, return debug info
+        diag (dict, optional): If given, 'pre_clip_state' is written into it with
+            the raw post-simulate state, recorded BEFORE the safety clip. Lets the
+            analysis see how hard the clip binds. NOTE this is a ONE-STEP overshoot,
+            not an unclipped trajectory: step t+1 still continues from the CLIPPED
+            state, so it answers "how far did this month want to go", not "what
+            would the event have reached without clipping".
         
     Returns:
         next_state (np.ndarray): Next state or tuple of (control_actions, updated_state, next_state) if debug
     """
     model = params['model']
-    current_month_idx = step_idx % 12  # current month index
+    # TRUE 0-based calendar month: callers pass step_idx = current_step + month_offset
+    # (see XROMultiYearEnv.step), so no further offset is applied here.
+    current_month_idx = int(calendar_month(step_idx))
 
     # Roll parameters to align with the current calendar month.
     # There are only 12 distinct rolls (one per month); rolling the xarray
@@ -43,19 +53,31 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
     var_names = params['var_names']
     bounds = params.get('bounds', {})
     action_scale_matrix = params.get('action_scale', None)
-    # Monthly action scale: pick the column for the current month
-    action_scale = np.array([row[current_month_idx] for row in action_scale_matrix])
+    # Monthly action scale: pick the column for the current month. Shared with the
+    # recorders in utils/evaluation.py via utils.actions, so the value stored for
+    # analysis is the value the dynamics actually applied.
+    action_scale = scale_for_step(current_month_idx, 0, action_scale_matrix)
     # 1. Apply Control Action
     control_actions = np.zeros_like(state)
     control_actions = action * action_scale
     control_actions = np.insert(control_actions, 0, 0)  # add 0 at beginning for nino action = 0
 
-    # Update State & Safety clip
+    # Update State & Safety clip.
+    # clip_mode selects which of the two safety clips are active:
+    #   'both'       (default, unchanged behaviour) -- clip here AND after simulate
+    #   'post'       -- clip only AFTER simulate (bounds the realised state; the only
+    #                   clip that can bound Nino3.4, and leaves the recorded action
+    #                   equal to the applied action)
+    #   'pre'        -- clip only HERE, before the dynamics (9 forced modes only)
+    #   'none'       -- no state clip; the Mahalanobis realism penalty is the sole
+    #                   constraint
+    clip_mode = params.get('clip_mode', 'both')
     updated_state = state + control_actions
-    for i, var_name in enumerate(var_names):
-        if var_name in bounds:
-            min_val, max_val = bounds[var_name]
-            updated_state[i] = np.clip(updated_state[i], min_val, max_val)
+    if clip_mode in ('both', 'pre'):
+        for i, var_name in enumerate(var_names):
+            if var_name in bounds:
+                min_val, max_val = bounds[var_name]
+                updated_state[i] = np.clip(updated_state[i], min_val, max_val)
 
     # 2. Prepare Input for XRO.simulate
     data_dict = {
@@ -103,11 +125,15 @@ def xro_step(state, params, action, rng, step_idx, xro_debug=False):
         # through gen_noise (which advances it).
         np.random.set_state(np_state)
 
-    # 5. Safety Clipping and NaN check
-    for i, var_name in enumerate(var_names):
-        if var_name in bounds:
-            min_val, max_val = bounds[var_name]
-            next_state[i] = np.clip(next_state[i], min_val, max_val)
+    # 5. Safety Clipping and NaN check (see clip_mode above).
+    # Record the raw dynamics output first, so the clip is measurable.
+    if diag is not None:
+        diag['pre_clip_state'] = next_state.copy()
+    if clip_mode in ('both', 'post'):
+        for i, var_name in enumerate(var_names):
+            if var_name in bounds:
+                min_val, max_val = bounds[var_name]
+                next_state[i] = np.clip(next_state[i], min_val, max_val)
 
     # If we still have NaNs, replace with zeros
     if np.isnan(next_state).any():

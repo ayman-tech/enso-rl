@@ -87,10 +87,41 @@ class EnvConfig:
         # State-plausibility (Mahalanobis) penalty: catches *extreme/implausible
         # states* (e.g. Nino3.4 at -3 sigma, impossible mode combinations),
         # complementary to the duration brake above.
-        "realism_penalty_weight": 0.05,
+        #
+        # This term now does the SHAPING that the hard state clip used to do by
+        # fiat (see clip_mode / bounds_scale below), so it is calibrated to bite:
+        # at w=0.20 / cap=10.0 a Mahalanobis excess of ~5 already costs 1.0, equal
+        # to the maximum per-step duration reward. The previous 0.05 / 3.0 needed
+        # an excess of ~21 to reach the same cost, which let the clip absorb the
+        # over-pushing instead -- and a clip returns no gradient, so the policy
+        # learned to lean on the bound (74.7% of MY El Nino peaks sat exactly on
+        # it, right-censoring peak amplitude).
+        "realism_penalty_weight": 0.20,
         # Saturation cap for realism penalty (tanh ramp). Safety net for early-training extremes.
-        "realism_penalty_cap": 3.0,
+        "realism_penalty_cap": 10.0,
     })
+
+    # --- State safety clip -------------------------------------------------
+    # xro_step applies up to two clips per step: one after the action is added
+    # (before the dynamics, 9 forced modes only) and one after model.simulate
+    # (all 10 modes). clip_mode selects which are active:
+    #   "post"  (default) -- only after simulate. This is the only clip that
+    #           bounds the realised state that is stored, observed and rewarded,
+    #           and the only one that can bound Nino3.4. It also leaves the
+    #           recorded action equal to the applied action: the pre-dynamics clip
+    #           silently removed ~8% of requested forcing (IOB 13%, WWV 12%) while
+    #           evaluation.py records the pre-clip value.
+    #   "both"  -- legacy behaviour (both clips), reproduces the model10 runs.
+    #   "pre"   -- only before the dynamics.
+    #   "none"  -- no state clip; the realism penalty is the sole constraint.
+    clip_mode: str = "post"
+
+    # Multiplier on the observed min/max envelope, applied about each mode's
+    # observed midpoint. With the realism penalty doing the shaping, the clip is a
+    # runaway guard rather than a shaping tool, so it sits outside the observed
+    # range and rarely binds (0.2% of mode-months at 1.5x, vs 3.9% at 1.0x).
+    # Set to 1.0 together with clip_mode="both" to recover the legacy setup.
+    bounds_scale: float = 1.5
 
     # Data configuration
     data_config: Dict = field(default_factory=lambda: {
@@ -115,5 +146,9 @@ class EnvConfig:
             raise ValueError("Each action_scale row must have 12 monthly values")
         if self.action_dim <= 0 or self.obs_dim <= 0:
             raise ValueError("action_dim and obs_dim must be positive")
+        if self.clip_mode not in ("both", "pre", "post", "none"):
+            raise ValueError(f"clip_mode must be both/pre/post/none, got {self.clip_mode!r}")
+        if self.bounds_scale < 1.0:
+            raise ValueError("bounds_scale must be >= 1.0 (1.0 = observed envelope)")
 
         self.action_scale = [[v / 2 for v in row] for row in self.action_scale]

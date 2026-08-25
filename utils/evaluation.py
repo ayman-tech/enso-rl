@@ -3,9 +3,11 @@ Evaluation utilities for ENSO RL agent.
 """
 import numpy as np
 from config.env_config import EnvConfig
+from utils.actions import scale_actions
 
 
-def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False):
+def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False,
+                   seed=None):
     """
     Evaluate agent performance over continuous steps.
 
@@ -17,6 +19,8 @@ def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False):
             This env is unwrapped, so its reward is in true units — unlike the
             VecNormalize-wrapped training env. Default False keeps the legacy
             single-value return for existing callers.
+        seed (int or None): Optional reset seed. Reuse it for agent and baseline
+            to compare identical initial conditions and physics noise.
 
     Returns:
         float: Probability of multi-year events (percentage of months in 24+ month
@@ -25,7 +29,7 @@ def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False):
     from utils.enso_classifier import classify_enso_event
 
     enso_history = []
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     enso_history.append(env.state[0])
     total_reward = 0.0
 
@@ -137,22 +141,50 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
               for paired comparison.
         
     Returns:
-        dict: Simulation data with trajectories and statistics
+        dict: Simulation data with trajectories and statistics. Two action arrays:
+            'raw_actions_traj' [T, 9] -- policy output in [-1, 1]
+            'actions_traj'     [T, 9] -- that action scaled by the per-mode, per-month
+                action_scale at the TRUE calendar month (step + month_offset) % 12,
+                i.e. the forcing the dynamics actually applied.
     """
     import time
     from utils.enso_classifier import classify_enso_event, summarize_classification
     
     start_time = time.perf_counter()
-    
-    # Get action_scale from config (single source of truth)
-    env_config = EnvConfig()
-    action_scale_matrix = np.array(env_config.action_scale)  # shape: (9, 12)
-    
+
+    # Take the action scale from the ENV, not a fresh EnvConfig(): the recorded
+    # forcing must be what the dynamics applied. (action_scale_median exists in the
+    # config and is unused -- the day an env is built with it, a config-derived
+    # recorder would silently diverge again.)
+    base_env = getattr(env, 'unwrapped', env)
+    try:
+        action_scale_matrix = np.asarray(base_env.params['action_scale'], dtype=np.float64)
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise AttributeError(
+            "env.params['action_scale'] is missing; cannot record the forcing the "
+            "dynamics applied. See utils.actions."
+        ) from exc
+
     simulation_data = []
     obs, _ = env.reset(seed=seed)
+
+    # reset() starts the seasonal clock at the SAMPLED state's calendar month, so the
+    # scale applied at step t is column (t + start_month) % 12. Read it after reset()
+    # and fail loudly if absent: silently defaulting to 0 is indistinguishable from a
+    # January rollout, which is exactly how the month-offset bug survived.
+    if not hasattr(base_env, 'month_offset'):
+        raise AttributeError(
+            "env has no month_offset; cannot record actions at the true calendar "
+            "month. See XROMultiYearEnv.reset and utils.actions."
+        )
+    start_month = int(base_env.month_offset)
+
     sim_enso_history = [env.state[0]]
     actions_history = []
     states_history = [env.state.copy()]
+    # Raw dynamics output before the safety clip (see xro_step(diag=...)). Equals
+    # states_history wherever the clip did not bind.
+    states_unclipped_history = [getattr(env, 'state_unclipped', env.state).copy()]
     total_rewards = 0.0
     
     if debug_mode:
@@ -170,16 +202,15 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         if disable_control_for_idx is not None:
             action[disable_control_for_idx] = 0.0
         
-        # Store scaled actions for consistent analysis (use current month's scale)
-        current_month = step % 12
-        action_scale = action_scale_matrix[:, current_month]
-        scaled_action = action * action_scale
-        actions_history.append(scaled_action)
-        
+        # Record the RAW policy action; the month-indexed scaling is applied once,
+        # vectorized, after the loop (see below).
+        actions_history.append(np.asarray(action, dtype=np.float64))
+
         obs, reward, terminated, truncated, _ = env.step(action)
         total_rewards += reward
         sim_enso_history.append(env.state[0])
         states_history.append(env.state.copy())
+        states_unclipped_history.append(getattr(env, 'state_unclipped', env.state).copy())
     
     end_time = time.perf_counter()
     elapsed = end_time - start_time
@@ -193,17 +224,28 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
                         (classified_event_array == 'Multi-year La Nina'))
     mye_prob = mye_months / len(classified_event_array)
 
+    # Apply the month-indexed scaling once, at the TRUE calendar month the physics
+    # used. Both arrays are returned so no downstream consumer ever has to unscale.
+    raw_actions = np.array(actions_history)                                 # [T, 9]
+    scaled_actions = scale_actions(raw_actions, start_month, action_scale_matrix)
+
     simulation_data = {
         'no_months': len(sim_enso_history) - 1,
         'enso_traj': np.array(sim_enso_history), # 3 month mean of xro simulates nino
-        'actions_traj': np.array(actions_history),
+        # REQUESTED forcing in each mode's physical units, scaled at the true calendar
+        # month. Note: under clip_mode 'pre'/'both' the pre-dynamics state clip can
+        # absorb part of it (~8% overall, IOB 13% / WWV 12% -- see EnvConfig.clip_mode),
+        # so requested != realised for legacy-config runs.
+        'actions_traj': scaled_actions,
+        'raw_actions_traj': raw_actions,   # policy output, in [-1, 1]
         'states_traj': np.array(states_history),
+        'states_unclipped_traj': np.array(states_unclipped_history),
         'classified_event': classified_event,  # Summary string
         'classified_event_array': classified_event_array,  # Detailed month-by-month
         # 0-based calendar month of step 0 (env.month_offset = sampled start month - 1).
         # Needed to bin actions/states by TRUE calendar month, since reset() starts the
         # seasonal clock at the sampled state's month, not January.
-        'month_offset': int(getattr(env, 'month_offset', 0)),
+        'month_offset': start_month,
         'avg_reward': avg_reward,
         'mye_probability': mye_prob,  # Percentage of months in multi-year events
         'mye_months': mye_months,  # Actual count of multi-year months
