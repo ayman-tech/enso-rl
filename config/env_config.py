@@ -68,7 +68,8 @@ class EnvConfig:
 
     # Reward structure parameters (matches _calculate_reward in xro_env.py)
     reward_config: Dict = field(default_factory=lambda: {
-        "action_penalty_weight": 0.002,
+        # Control-effort cost, -w * sum(a^2). 
+        "action_penalty_weight": 0.05,
         "duration_reward_0_6m": 0.1,
         "duration_reward_7_12m": 0.3,
         "duration_reward_13m_plus": 1.0,  # full reward in the multi-year band
@@ -117,11 +118,8 @@ class EnvConfig:
     clip_mode: str = "post"
 
     # Multiplier on the observed min/max envelope, applied about each mode's
-    # observed midpoint. With the realism penalty doing the shaping, the clip is a
-    # runaway guard rather than a shaping tool, so it sits outside the observed
-    # range and rarely binds (0.2% of mode-months at 1.5x, vs 3.9% at 1.0x).
-    # Set to 1.0 together with clip_mode="both" to recover the legacy setup.
-    bounds_scale: float = 1.5
+    # observed midpoint.
+    bounds_scale: float = 1.0
 
     # Data configuration
     data_config: Dict = field(default_factory=lambda: {
@@ -150,5 +148,3 @@ class EnvConfig:
             raise ValueError(f"clip_mode must be both/pre/post/none, got {self.clip_mode!r}")
         if self.bounds_scale < 1.0:
             raise ValueError("bounds_scale must be >= 1.0 (1.0 = observed envelope)")
-
-        self.action_scale = [[v / 2 for v in row] for row in self.action_scale]

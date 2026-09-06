@@ -286,6 +286,10 @@ def main():
         spinup=SPINUP,
         bounds_scale=env_config.bounds_scale,
         clip_mode=env_config.clip_mode,
+        # The [9,12] scale THIS run used. Recorded because EnvConfig.action_scale can
+        # change between runs (it was halved historically), and without it a consumer
+        # silently rescales old files with today's table.
+        action_scale=np.asarray(env_config.action_scale, dtype=np.float64),
         agent_obs=agent_obs,
         agent_actions=agent_actions,
         agent_actions_raw=agent_actions_raw,

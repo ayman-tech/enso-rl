@@ -18,13 +18,16 @@ import wandb
 from datetime import datetime
 from pathlib import Path
 from scipy import stats as sp_stats
-from utils.nb_helper import _fdr
 
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
+# Project imports must come AFTER the sys.path.insert above: running this file as a
+# script puts scripts/analysis on sys.path[0], not the repo root, so `utils` is not
+# importable until repo_root is added.
 from stable_baselines3 import PPO
 from config import EnvConfig, WandbConfig
+from utils.nb_helper import _fdr
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
 from envs import XROMultiYearEnv
