@@ -29,6 +29,7 @@
 #   JOBS=8 SWEEP="1 2 3 4 5" bash seed_axis_test.sh
 #   TOTAL_TIMESTEPS=600000 bash seed_axis_test.sh   # longer training per run
 #   NO_WANDB=1 bash seed_axis_test.sh               # disable W&B logging
+#   REGIME=recharge_constrained bash seed_axis_test.sh   # sweep the other regime
 
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -38,6 +39,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-240000}"  # training timesteps (env steps) p
 PIN="${PIN:-0}"                   # value the four fixed axes are held at
 SWEEP="${SWEEP:-1 2 3 4 5 6 7 8 9 10}"       # values the target axis is swept over
 PREFIX="${PREFIX:-rng}"          # model-name prefix
+REGIME="${REGIME:-max_persistence}"
 AXES="${AXES:-weight action batch init physics}"
 JOBS="${JOBS:-${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}}"
 LOGDIR="${LOGDIR:-logs/sweep}"
@@ -61,11 +63,11 @@ flag_for() {
 # Emit one full command per line for every run in the sweep.
 build_jobs() {
   # baseline: all axes pinned at $PIN -> name carries an explicit _seed<PIN> suffix
-  echo "uv run scripts/train.py --total-timesteps $TOTAL_TIMESTEPS --seed $PIN --name ${PREFIX}_seed${PIN} $EXTRA > $LOGDIR/baseline.log 2>&1"
+  echo "uv run scripts/train.py --total-timesteps $TOTAL_TIMESTEPS --seed $PIN --regime $REGIME --name ${PREFIX}_seed${PIN} $EXTRA > $LOGDIR/baseline.log 2>&1"
   for axis in $AXES; do
     local flag; flag="$(flag_for "$axis")"
     for v in $SWEEP; do
-      echo "uv run scripts/train.py --total-timesteps $TOTAL_TIMESTEPS --seed $PIN $flag $v --name ${PREFIX}-${axis} $EXTRA > $LOGDIR/${axis}-${v}.log 2>&1"
+      echo "uv run scripts/train.py --total-timesteps $TOTAL_TIMESTEPS --seed $PIN $flag $v --regime $REGIME --name ${PREFIX}-${axis} $EXTRA > $LOGDIR/${axis}-${v}.log 2>&1"
     done
   done
 }
@@ -77,6 +79,7 @@ total=$(( 1 + n_axes * n_sweep ))
 echo "=================================================================="
 echo "RANDOMNESS-SENSITIVITY SWEEP (parallel)"
 echo "  total_timesteps/run = $TOTAL_TIMESTEPS | pin = $PIN | sweep = [$SWEEP] | prefix = $PREFIX"
+echo "  regime     = $REGIME (identical for every run)"
 echo "  axes       = $AXES"
 echo "  jobs       = $JOBS parallel"
 echo "  total runs = $total  (1 baseline + $n_axes axes x $n_sweep seeds)"

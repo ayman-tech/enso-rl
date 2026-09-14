@@ -15,17 +15,23 @@ total_timesteps ?= 1200000
 # Reward regime (config.REGIMES). max_persistence = unconstrained, the agent chains MYE. 
 # recharge_constrained = an event starting too soon after prev is penalised
 regime ?= max_persistence
+# Parallel agents / seeds at once. Unset = each script's default (cpu_count-2, itself
+# capped at the number of seeds). Set it on a cluster: multiprocessing.cpu_count()
+# reports the NODE's cores, not your --cpus-per-task allocation, so a 30-seed
+# ensemble-robust on a 16-CPU allocation would oversubscribe ~2x.
+workers ?=
+WORKERS := $(if $(workers),--workers $(workers),)
 
 train:
 	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) --regime $(regime)
 ensemble-quick:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --regime $(regime) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --regime $(regime) $(WORKERS) --no-wandb
 ensemble-robust:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --regime $(regime) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --regime $(regime) $(WORKERS) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
-	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200
+	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200 $(WORKERS)
 
 # =============== X-AI methods ================
 shapley:
@@ -68,19 +74,19 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) regime=$(regime)
-	$(MAKE) inference name=$(name)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) regime=$(regime) workers=$(workers)
+	$(MAKE) inference name=$(name) workers=$(workers)
 
 train-robust:
-	$(MAKE) ensemble-robust name=$(name) regime=$(regime)
+	$(MAKE) ensemble-robust name=$(name) regime=$(regime) workers=$(workers)
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:
-	$(MAKE) train-quick name=$(name) regime=$(regime)
+	$(MAKE) train-quick name=$(name) regime=$(regime) workers=$(workers)
 	$(MAKE) xai-quick name=$(name)
 
 full-robust:
-	$(MAKE) train-robust name=$(name) regime=$(regime)
+	$(MAKE) train-robust name=$(name) regime=$(regime) workers=$(workers)
 	$(MAKE) xai-robust name=$(name)
 
 
