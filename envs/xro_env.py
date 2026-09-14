@@ -88,6 +88,11 @@ class XROMultiYearEnv(gym.Env):
         # Saturation caps for the two soft-constraint penalties. See _calculate_reward / _realism_penalty for the tanh ramp.
         self.duration_penalty_cap = reward_config.get('duration_penalty_cap', 5.0)
         self.realism_penalty_cap = reward_config.get('realism_penalty_cap', 3.0)
+        # Recharge requirement. 0 disables the term entirely, ie max_persistence regime
+        self.recovery_gap_months = reward_config.get('recovery_gap_months', 0)
+        self.recovery_gap_penalty = reward_config.get('recovery_gap_penalty', 0.0)
+        self._months_since_event = 999   # large => the first event is never premature
+        self._premature_event = False
         # Scale for the duration feature in the observation (months); ~1.0 at 2 years.
         self._duration_norm = 24.0
 
@@ -160,6 +165,8 @@ class XROMultiYearEnv(gym.Env):
         self.enso_history = [self.state[0]]
         self.consecutive_enso_months = 0
         self.enso_phase_sign = 0
+        self._months_since_event = 999
+        self._premature_event = False
 
         return self._get_obs(), {}
 
@@ -237,6 +244,7 @@ class XROMultiYearEnv(gym.Env):
         else:
             current_sign = 0
 
+        event_started = False
         if current_sign == 0:
             # Neutral: event ends
             self.consecutive_enso_months = 0
@@ -246,8 +254,21 @@ class XROMultiYearEnv(gym.Env):
         else:
             # New event of the opposite (or first) phase
             self.consecutive_enso_months = 1
+            event_started = True
         self.enso_phase_sign = current_sign
-        
+        gap_penalty = 0.0
+        if self.recovery_gap_months > 0:
+            if current_sign == 0:
+                self._months_since_event = min(self._months_since_event + 1, 999)
+                self._premature_event = False
+            else:
+                if event_started:
+                    self._premature_event = (
+                        self._months_since_event < self.recovery_gap_months)
+                    self._months_since_event = 0
+                if self._premature_event:
+                    gap_penalty = -self.recovery_gap_penalty
+
         # Duration reward: full in the multi-year band, then a soft per-phase
         # over-persistence penalty beyond the observed ceiling. The ramp (not a
         # cliff) keeps realistic long events fully rewarded while making
@@ -278,7 +299,8 @@ class XROMultiYearEnv(gym.Env):
         realism_penalty = self._realism_penalty()
 
         # Combine all components
-        total_reward = duration_reward + duration_penalty + realism_penalty + action_penalty
+        total_reward = (duration_reward + duration_penalty + realism_penalty
+                        + action_penalty + gap_penalty)
 
         return float(total_reward)
 

@@ -5,9 +5,28 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional
 
 
+# The two studied regimes. `recovery_gap_months` is the mechanism; these presets are the
+# only values it is ever given, so a run is identified by NAME, not by a number.
+#   max_persistence      -- unconstrained: the agent may chain multi-year events back to
+#                           back. The control-limit model, and the one XAI runs on.
+#   recharge_constrained -- a new event must wait `recovery_gap_months` neutral months
+#                           after the previous one ends, or it is charged
+#                           `recovery_gap_penalty` every month it runs. Prices the
+#                           recharge requirement, so the controlled climate spends real
+#                           time in neutral instead of oscillating without pause.
+REGIMES = {
+    "max_persistence":      {"recovery_gap_months": 0, "recovery_gap_penalty": 0.0},
+    "recharge_constrained": {"recovery_gap_months": 6, "recovery_gap_penalty": 2.0},
+}
+
+
 @dataclass
 class EnvConfig:
     """Configuration for XROMultiYearEnv."""
+
+    # Which regime to train/evaluate under. Stamps the matching REGIMES entry onto
+    # reward_config in __post_init__ -- see REGIMES above.
+    regime: str = "max_persistence"
 
     # ENSO threshold for determining events
     threshold: float = 0.5
@@ -100,6 +119,10 @@ class EnvConfig:
         "realism_penalty_weight": 0.20,
         # Saturation cap for realism penalty (tanh ramp). Safety net for early-training extremes.
         "realism_penalty_cap": 10.0,
+        # Recharge requirement, when gap b/w events is less than recovery_gap_months 
+        # neutral is penalized recovery_gap_penalty EVERY month
+        "recovery_gap_months": 0,
+        "recovery_gap_penalty": 0.0,
     })
 
     # --- State safety clip -------------------------------------------------
@@ -135,7 +158,11 @@ class EnvConfig:
     # })
 
     def __post_init__(self):
-        """Validate configuration."""
+        """Validate configuration and stamp the selected regime onto reward_config."""
+        if self.regime not in REGIMES:
+            raise ValueError(
+                f"regime must be one of {sorted(REGIMES)}, got {self.regime!r}")
+        self.reward_config.update(REGIMES[self.regime])
         if self.threshold <= 0:
             raise ValueError("Threshold must be positive")
         if len(self.action_scale) != self.action_dim:

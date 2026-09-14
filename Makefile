@@ -12,13 +12,16 @@ name ?= model
 # Training duration (env steps; 1 step = 1 month). Overridable per-invocation, and
 # set per-pipeline by train-quick / train-robust below.
 total_timesteps ?= 1200000
+# Reward regime (config.REGIMES). max_persistence = unconstrained, the agent chains MYE. 
+# recharge_constrained = an event starting too soon after prev is penalised
+regime ?= max_persistence
 
 train:
-	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
+	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) --regime $(regime)
 ensemble-quick:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --regime $(regime) --no-wandb
 ensemble-robust:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --regime $(regime) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
@@ -65,19 +68,19 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) regime=$(regime)
 	$(MAKE) inference name=$(name)
 
 train-robust:
-	$(MAKE) ensemble-robust name=$(name)
+	$(MAKE) ensemble-robust name=$(name) regime=$(regime)
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:
-	$(MAKE) train-quick name=$(name)
+	$(MAKE) train-quick name=$(name) regime=$(regime)
 	$(MAKE) xai-quick name=$(name)
 
 full-robust:
-	$(MAKE) train-robust name=$(name)
+	$(MAKE) train-robust name=$(name) regime=$(regime)
 	$(MAKE) xai-robust name=$(name)
 
 

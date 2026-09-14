@@ -7,6 +7,7 @@ Imported by both:
 
 Keeping these here avoids duplicating the setup logic across the two notebooks.
 """
+import json
 import warnings
 from pathlib import Path
 
@@ -178,15 +179,24 @@ def _load_npz(path):
     return np.load(path, allow_pickle=True)
 
 
-# inference.npz schema. Bumped to 2 when the month-offset action bug was fixed:
+# inference.npz schema history:
 #   v1 -- 'agent_actions' scaled by step % 12 (WRONG for any rollout not starting in
 #         January, i.e. ~90% of them); no 'agent_actions_raw'.
 #   v2 -- 'agent_actions' scaled at the TRUE calendar month (step + rollout_start_month)
 #         % 12, and 'agent_actions_raw' (policy output in [-1, 1]) stored alongside.
-INFERENCE_SCHEMA = 2
+#   v3 -- 'regime' and 'reward_config' recorded, so a file says which reward the run
+#         was trained under (max_persistence vs recharge_constrained).
+#
+# WRITER version -- what inference.py stamps on new files.
+INFERENCE_SCHEMA = 3
+# READER gate -- the oldest version still safe to read. Deliberately NOT bumped to 3:
+# v2 files are correct, they merely lack the provenance fields, and
+# inference_reward_config() reports that absence explicitly. Only v1 is dangerous
+# (silently mis-scaled actions), which is the failure this gate exists for.
+MIN_INFERENCE_SCHEMA = 2
 
 
-def load_inference(path, require=INFERENCE_SCHEMA):
+def load_inference(path, require=MIN_INFERENCE_SCHEMA):
     """Load inference.npz, refusing schema versions with the month-offset action bug.
 
     The dangerous direction is an old npz read by a migrated notebook: the actions
@@ -204,6 +214,22 @@ def load_inference(path, require=INFERENCE_SCHEMA):
             f"  (models predating clip_mode need --clip-mode both --bounds-scale 1.0)"
         )
     return d
+
+
+def inference_regime(d):
+    """Reward regime the run used, or None for files written before schema v3."""
+    return str(d['regime']) if 'regime' in d.files else None
+
+
+def inference_reward_config(d):
+    """Reward weights the run used; {} for files written before schema v3.
+
+    An empty dict means "not recorded", NOT "no penalties" -- a v2 file was produced
+    before the field existed and says nothing about which reward trained the model.
+    """
+    if 'reward_config' not in d.files:
+        return {}
+    return json.loads(str(d['reward_config']))
 
 
 def _median_iqr(arr, axis=0):

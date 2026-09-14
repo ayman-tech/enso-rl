@@ -9,7 +9,12 @@ without re-running simulation.
 Output: plots/{model}/inference.npz
 
 npz arrays:
-  schema_version      scalar (=2)               see utils.nb_helper.load_inference
+  schema_version      scalar (=3)               see utils.nb_helper.load_inference
+  regime              scalar str                reward regime the model trained under:
+                                                 'max_persistence' (unconstrained) or
+                                                 'recharge_constrained'
+  reward_config       scalar str (JSON)         the full reward weights of this run;
+                                                 read via nb_helper.inference_reward_config
   var_names           [10]                      XRO mode names (Nino3.4 … SASD)
   action_names        [9]                       forcing mode names (var_names[1:])
   seeds               [n_seeds]                 model seed indices used
@@ -67,21 +72,23 @@ Usage:
 Seeds are auto-detected from all existing models/{model}_seed*.zip files.
 """
 import sys
+import json
 import time
 import argparse
 import numpy as np
 import multiprocessing as mp
+from dataclasses import asdict
 from multiprocessing import cpu_count
 from pathlib import Path
 
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from utils.model_io import load_environment
+from utils.model_io import load_environment, resolve_env_config, envconfig_path
 from utils.evaluation import simulate_trajectory
 from utils import suppress_warnings
 from utils.seeding import discover_seeds
-from config import EnvConfig
+from config import EnvConfig, REGIMES
 
 from utils.nb_helper import INFERENCE_SCHEMA
 
@@ -177,6 +184,10 @@ def main():
                              "EnvConfig.clip_mode. Models trained before clip_mode "
                              "existed (model4..model10) need --clip-mode both "
                              "--bounds-scale 1.0 to reproduce their rollouts.")
+    parser.add_argument("--regime",      type=str, default=None, choices=sorted(REGIMES),
+                        help="Reward regime to record in the npz. Normally read from "
+                             "the model's _envconfig.json sidecar; pass this only for "
+                             "models trained before the sidecar existed.")
     parser.add_argument("--out",         type=str, default=None,
                         help="Output npz path (default: plots/{model}/inference.npz). "
                              "Use it to write a verification run without clobbering.")
@@ -200,13 +211,40 @@ def main():
     out_path = Path(args.out) if args.out else output_dir / "inference.npz"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    env_config = EnvConfig()
+    # Config the models were TRAINED under, from the sidecar written by train.py.
+    # Falls back (with a warning) to current defaults for models that predate it.
+    first_model = f"{args.model}_seed{valid_seeds[0]}"
+    env_config = resolve_env_config(first_model)
+    cfg_source = (str(envconfig_path(first_model))
+                  if envconfig_path(first_model).exists() else "EnvConfig() defaults")
+
+    # An ensemble whose seeds disagree on the regime or the physics is not an ensemble.
+    for seed in valid_seeds[1:]:
+        other_path = envconfig_path(f"{args.model}_seed{seed}")
+        if not other_path.exists():
+            continue
+        other = resolve_env_config(f"{args.model}_seed{seed}")
+        mismatched = {k: (getattr(env_config, k), getattr(other, k))
+                      for k in ("regime", "clip_mode", "bounds_scale")
+                      if getattr(env_config, k) != getattr(other, k)}
+        if mismatched:
+            parser.error(
+                f"seed {valid_seeds[0]} and seed {seed} of '{args.model}' were trained "
+                f"under different settings: {mismatched}. Averaging them is meaningless.")
+
+    # Explicit flags override the sidecar (and are the only way to set these for
+    # pre-sidecar models).
     if args.bounds_scale is not None:
         if args.bounds_scale < 1.0:
             parser.error("--bounds-scale must be >= 1.0")
         env_config.bounds_scale = args.bounds_scale
     if args.clip_mode is not None:
         env_config.clip_mode = args.clip_mode
+    if args.regime is not None:
+        # Rebuild rather than mutate, so __post_init__ re-stamps reward_config from
+        # REGIMES -- one source of truth for what a regime name means. asdict()
+        # deep-copies, so the new config shares no dict with the old one.
+        env_config = EnvConfig(**{**asdict(env_config), "regime": args.regime})
     master_rng = np.random.default_rng(args.master_seed)
 
     print("=" * 60)
@@ -218,6 +256,9 @@ def main():
     print(f"  months     = {args.months}")
     print(f"  clip_mode  = {env_config.clip_mode}")
     print(f"  bounds     = {env_config.bounds_scale}x")
+    print(f"  regime     = {env_config.regime} "
+          f"(gap={env_config.reward_config['recovery_gap_months']}mo)")
+    print(f"  env config = {cfg_source}")
     print(f"  output     = {out_path}")
     print()
 
@@ -286,6 +327,8 @@ def main():
         spinup=SPINUP,
         bounds_scale=env_config.bounds_scale,
         clip_mode=env_config.clip_mode,
+        regime=env_config.regime,
+        reward_config=json.dumps(env_config.reward_config, sort_keys=True),
         # The [9,12] scale THIS run used. Recorded because EnvConfig.action_scale can
         # change between runs (it was halved historically), and without it a consumer
         # silently rescales old files with today's table.

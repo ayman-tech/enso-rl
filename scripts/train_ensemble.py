@@ -27,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
+from config import REGIMES
+
 
 def _build_cmd(seed, args, train_script):
     """Build the train.py command for one seed (identical to the serial invocation)."""
@@ -37,6 +39,8 @@ def _build_cmd(seed, args, train_script):
            "--name", name]
     if args.lr is not None:
         cmd += ["--lr", str(args.lr)]
+    if args.regime is not None:
+        cmd += ["--regime", args.regime]
     if args.no_wandb:
         cmd += ["--no-wandb"]
     return name, cmd
@@ -72,6 +76,9 @@ def main():
     parser.add_argument("--total-timesteps", type=int, default=240_000,
                         help="Total training timesteps per agent")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate override")
+    parser.add_argument("--regime", type=str, default=None, choices=sorted(REGIMES),
+                        help="Reward regime for every agent in the ensemble "
+                             "(see scripts/train.py --regime). Default: train.py's.")
     parser.add_argument("--prefix", type=str, default="ensemble_model",
                         help="Model name prefix; saved as models/<prefix>_seed<seed>")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
