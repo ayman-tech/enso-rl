@@ -12,9 +12,11 @@ name ?= model
 # Training duration (env steps; 1 step = 1 month). Overridable per-invocation, and
 # set per-pipeline by train-quick / train-robust below.
 total_timesteps ?= 1200000
-# Reward regime (config.REGIMES). max_persistence = unconstrained, the agent chains MYE. 
-# recharge_constrained = an event starting too soon after prev is penalised
-regime ?= max_persistence
+# Control-effort weight (reward_config.action_penalty_weight). Unset = config default
+# (0.05), which gives maximal multi-year persistence. 0.6 gives ~48% multi-year-event
+# months, close to observed variability.
+action_penalty ?=
+AP := $(if $(action_penalty),--action-penalty $(action_penalty),)
 # Parallel agents / seeds at once. Unset = each script's default (cpu_count-2, itself
 # capped at the number of seeds). Set it on a cluster: multiprocessing.cpu_count()
 # reports the NODE's cores, not your --cpus-per-task allocation, so a 30-seed
@@ -23,11 +25,11 @@ workers ?=
 WORKERS := $(if $(workers),--workers $(workers),)
 
 train:
-	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) --regime $(regime)
+	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) $(AP)
 ensemble-quick:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --regime $(regime) $(WORKERS) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) --no-wandb
 ensemble-robust:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --regime $(regime) $(WORKERS) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
@@ -74,19 +76,19 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) regime=$(regime) workers=$(workers)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) inference name=$(name) workers=$(workers)
 
 train-robust:
-	$(MAKE) ensemble-robust name=$(name) regime=$(regime) workers=$(workers)
+	$(MAKE) ensemble-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:
-	$(MAKE) train-quick name=$(name) regime=$(regime) workers=$(workers)
+	$(MAKE) train-quick name=$(name) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) xai-quick name=$(name)
 
 full-robust:
-	$(MAKE) train-robust name=$(name) regime=$(regime) workers=$(workers)
+	$(MAKE) train-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) xai-robust name=$(name)
 
 

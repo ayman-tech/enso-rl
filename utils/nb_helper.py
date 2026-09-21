@@ -184,8 +184,8 @@ def _load_npz(path):
 #         January, i.e. ~90% of them); no 'agent_actions_raw'.
 #   v2 -- 'agent_actions' scaled at the TRUE calendar month (step + rollout_start_month)
 #         % 12, and 'agent_actions_raw' (policy output in [-1, 1]) stored alongside.
-#   v3 -- 'regime' and 'reward_config' recorded, so a file says which reward the run
-#         was trained under (max_persistence vs recharge_constrained).
+#   v3 -- 'reward_config' recorded, so a file says which reward weights the run was
+#         trained under.
 #
 # WRITER version -- what inference.py stamps on new files.
 INFERENCE_SCHEMA = 3
@@ -214,11 +214,6 @@ def load_inference(path, require=MIN_INFERENCE_SCHEMA):
             f"  (models predating clip_mode need --clip-mode both --bounds-scale 1.0)"
         )
     return d
-
-
-def inference_regime(d):
-    """Reward regime the run used, or None for files written before schema v3."""
-    return str(d['regime']) if 'regime' in d.files else None
 
 
 def inference_reward_config(d):

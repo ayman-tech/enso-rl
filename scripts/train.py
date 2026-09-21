@@ -26,7 +26,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Import configurations and utilities
-from config import TrainConfig, EnvConfig, WandbConfig, REGIMES
+from config import TrainConfig, EnvConfig, WandbConfig
 from utils import suppress_warnings, timer
 from utils.model_io import save_env_config
 from utils.seeding import SeedBundle, resolve_seeds, model_name
@@ -105,9 +105,7 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
         "action_scale": env_config.action_scale,
         "bounds_scale": env_config.bounds_scale,
         "clip_mode": env_config.clip_mode,
-        "regime": env_config.regime,
-        "recovery_gap_months": env_config.reward_config["recovery_gap_months"],
-        "recovery_gap_penalty": env_config.reward_config["recovery_gap_penalty"],
+        "action_penalty_weight": env_config.reward_config["action_penalty_weight"],
         "enso_threshold": env_config.threshold,
         "debug_mode": train_config.debug_mode,
         "learning_rate": train_config.learning_rate,
@@ -323,19 +321,17 @@ def main():
     parser.add_argument("--seed-batch", type=int, default=None, help="Override seed: mini-batch shuffle")
     parser.add_argument("--seed-init", type=int, default=None, help="Override seed: env start state")
     parser.add_argument("--seed-physics", type=int, default=None, help="Override seed: XRO climate noise")
-    parser.add_argument("--regime", type=str, default="max_persistence",
-                        choices=sorted(REGIMES),
-                        help="Reward regime. max_persistence: unconstrained, the agent "
-                             "may chain multi-year events back to back "
-                             "recharge_constrained: an event starting too "
-                             "soon after the prev is penalised every month,")
+    parser.add_argument("--action-penalty", type=float, default=None,
+                        help="Control-effort weight (reward_config.action_penalty_weight). "
+                             "Default 0.05 = maximal persistence; 0.60 gives ~48%% "
+                             "multi-year-event months, close to observed variability.")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument("--name", type=str, default="train-run", help="Name of WandB training Run")
     args = parser.parse_args()
 
     # Load configurations
     train_config = TrainConfig()
-    env_config = EnvConfig(regime=args.regime)
+    env_config = EnvConfig()
     wandb_config = WandbConfig()
     
     # Override with command line args
@@ -351,6 +347,8 @@ def main():
         env_config.bounds_scale = args.bounds_scale
     if args.lr:
         train_config.learning_rate = args.lr
+    if args.action_penalty is not None:
+        env_config.reward_config["action_penalty_weight"] = args.action_penalty
     if args.no_wandb:
         wandb_config.mode = "disabled"
 
@@ -378,9 +376,7 @@ def main():
     print("-"*20 + "ENSO RL AGENT TRAINING PIPELINE" + "-"*20)
     print(f"Seeds: {seeds.as_log_dict()}")
     print(f"Model name: {save_name}")
-    print(f"Regime: {env_config.regime} "
-          f"(recovery_gap_months={env_config.reward_config['recovery_gap_months']}, "
-          f"penalty={env_config.reward_config['recovery_gap_penalty']})")
+    print(f"Action penalty (lambda): {env_config.reward_config['action_penalty_weight']}")
     print(f"Env config: {cfg_path}")
     
     try:
