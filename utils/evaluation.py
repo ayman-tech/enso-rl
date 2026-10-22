@@ -70,7 +70,8 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
         dict: {'total', 'el_nino', 'la_nina'} — fraction of months in a
               multi-year event of each type.
     """
-    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+    from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                       mye_fraction_by_phase)
 
     obs, _ = env.reset(seed=seed)
     enso_history = [env.state[0]]
@@ -82,11 +83,13 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
         obs, _, _, _, _ = env.step(action)
         enso_history.append(env.state[0])
 
-    classified = classify_enso_event(enso_history, threshold=env.threshold)
+    classified = classify_enso_event(enso_history, threshold=env.threshold,
+                                     smooth_window=ONI_SMOOTH_MONTHS)
     return mye_fraction_by_phase(classified)
 
 
-def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration=12):
+def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration=12,
+                       smooth_window=None):
     """Single rollout returning, per phase, the multi-year-ENSO time-fraction PLUS
     the count and per-event durations (months) of multi-year events.
 
@@ -95,10 +98,18 @@ def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration
     MORE FREQUENT or LONGER? A multi-year event is a continuous same-sign run of
     |Nino3.4|>threshold lasting > min_duration months (matches classify_enso_event).
 
+    `smooth_window` defaults to ONI_SMOOTH_MONTHS -- the counts and durations here
+    are reported quantities, so they use the same ONI-convention index as
+    classify_enso_event. Pass 1 for raw monthly.
+
     Returns dict phase -> {'frac', 'count', 'durations'(list of months)}.
     """
-    from utils.enso_classifier import (classify_enso_event, mye_fraction_by_phase,
-                                        _find_continuous_runs)
+    from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                       mye_fraction_by_phase, running_mean,
+                                       _find_continuous_runs)
+
+    if smooth_window is None:
+        smooth_window = ONI_SMOOTH_MONTHS
 
     obs, _ = env.reset(seed=seed)
     enso_history = [env.state[0]]
@@ -110,7 +121,9 @@ def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration
         obs, _, _, _, _ = env.step(action)
         enso_history.append(env.state[0])
 
-    enso = np.asarray(enso_history)
+    # Smooth once and threshold the same series the classifier sees, so the counts
+    # and durations below cannot drift from `frac`.
+    enso = running_mean(enso_history, smooth_window)
     thr = env.threshold
     frac = mye_fraction_by_phase(classify_enso_event(enso, threshold=thr))
 
@@ -126,10 +139,10 @@ def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration
 
 
 def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_idx=None,
-                       debug_mode=False, seed=None):
+                       debug_mode=False, seed=None, smooth_window=None):
     """
     Simulate a continuous trajectory with optional action disabling.
-    
+
     Args:
         env: Gymnasium environment
         agent: Trained agent (if None, uses zero actions)
@@ -139,17 +152,33 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
         seed (int or None): Random seed for env.reset(). Fixes initial conditions
               AND noise sequence. Use the same seed across baseline + interventions
               for paired comparison.
-        
+        smooth_window (int or None): Centered running-mean window applied to
+              Nino3.4 before event classification. None uses ONI_SMOOTH_MONTHS
+              (the reporting convention); pass 1 for raw monthly.
+
+              This is the analysis/reporting boundary. `simulate_trajectory` feeds
+              every *reported* event statistic, so it smooths; `evaluate_agent`
+              feeds the training callback's checkpoint-selection metric and
+              deliberately does not, so the policy that ships is unchanged.
+
     Returns:
         dict: Simulation data with trajectories and statistics. Two action arrays:
             'raw_actions_traj' [T, 9] -- policy output in [-1, 1]
             'actions_traj'     [T, 9] -- that action scaled by the per-mode, per-month
                 action_scale at the TRUE calendar month (step + month_offset) % 12,
                 i.e. the forcing the dynamics actually applied.
+        Two Nino3.4 series:
+            'enso_traj' [T+1] -- raw monthly, for spectra / phase / composites
+            'enso_oni'  [T+1] -- centered `smooth_window`-month mean, what the
+                event labels were computed from.
     """
     import time
-    from utils.enso_classifier import classify_enso_event, summarize_classification
-    
+    from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                       running_mean, summarize_classification)
+
+    if smooth_window is None:
+        smooth_window = ONI_SMOOTH_MONTHS
+
     start_time = time.perf_counter()
 
     # Take the action scale from the ENV, not a fresh EnvConfig(): the recorded
@@ -215,7 +244,13 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     end_time = time.perf_counter()
     elapsed = end_time - start_time
     
-    classified_event_array = classify_enso_event(sim_enso_history, threshold=env.threshold)
+    # Events are defined on the ONI-convention index (centered 3-month mean), while
+    # the raw monthly series is kept for the dynamical diagnostics -- spectra, phase
+    # leads, coherence and the lifecycle composites. A running mean is a low-pass
+    # filter, so smoothing before a Welch spectrum would suppress high frequencies by
+    # construction; those must stay on 'enso_traj'.
+    enso_oni = running_mean(sim_enso_history, smooth_window)
+    classified_event_array = classify_enso_event(enso_oni, threshold=env.threshold)
     classified_event = summarize_classification(classified_event_array)
     avg_reward = total_rewards / num_months
     
@@ -231,7 +266,10 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
 
     simulation_data = {
         'no_months': len(sim_enso_history) - 1,
-        'enso_traj': np.array(sim_enso_history), # 3 month mean of xro simulates nino
+        'enso_traj': np.array(sim_enso_history), # raw monthly Nino3.4 (env.state[0]); NOT smoothed
+        'enso_oni': enso_oni,              # centered smooth_window-month mean; the
+                                           # series the event labels were computed from
+        'smooth_window': int(smooth_window),
         # REQUESTED forcing in each mode's physical units, scaled at the true calendar
         # month. Note: under clip_mode 'pre'/'both' the pre-dynamics state clip can
         # absorb part of it (~8% overall, IOB 13% / WWV 12% -- see EnvConfig.clip_mode),

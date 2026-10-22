@@ -49,24 +49,28 @@ def compute_metric_from_trajectory(enso_history, threshold, metric):
     Returns:
         float: Metric value
     """
-    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+    from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                       mye_fraction_by_phase, running_mean)
     enso = np.array(enso_history)
 
     if metric in ('mye_prob', 'mye_prob_el_nino', 'mye_prob_la_nina'):
-        classified = classify_enso_event(enso, threshold=threshold)
+        classified = classify_enso_event(enso, threshold=threshold,
+                                         smooth_window=ONI_SMOOTH_MONTHS)
         phase = mye_fraction_by_phase(classified)
         return {'mye_prob': phase['total'], 'mye_prob_el_nino': phase['el_nino'],
                 'mye_prob_la_nina': phase['la_nina']}[metric]
 
     if metric == '_unused_legacy_mye':
-        classified = classify_enso_event(enso, threshold=threshold)
+        classified = classify_enso_event(enso, threshold=threshold,
+                                         smooth_window=ONI_SMOOTH_MONTHS)
         mye_months = np.sum(
             (classified == 'Multi-year El Nino') | (classified == 'Multi-year La Nina')
         )
         return mye_months / len(classified)
 
     elif metric == 'enso_months':
-        return float(np.sum(np.abs(enso) >= threshold))
+        # Same ONI index as the event metrics above, so the two cannot disagree.
+        return float(np.sum(np.abs(running_mean(enso, ONI_SMOOTH_MONTHS)) >= threshold))
 
     raise ValueError(f"Unknown metric: {metric}")
 
@@ -200,7 +204,8 @@ def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, see
 
     Returns dict {'total', 'el_nino', 'la_nina'} of multi-year fractions.
     """
-    from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+    from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                       mye_fraction_by_phase)
 
     obs, _ = env.reset(seed=seed)
     enso_history = [float(env.state[0])]
@@ -210,7 +215,8 @@ def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, see
         obs, _reward, _terminated, _truncated, _ = env.step(action)
         enso_history.append(float(env.state[0]))
 
-    classified = classify_enso_event(np.asarray(enso_history), threshold=env.threshold)
+    classified = classify_enso_event(np.asarray(enso_history), threshold=env.threshold,
+                                     smooth_window=ONI_SMOOTH_MONTHS)
     return mye_fraction_by_phase(classified)
 
 

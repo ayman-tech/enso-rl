@@ -39,7 +39,8 @@ sys.path.insert(0, str(analysis_dir))
 sys.path.insert(0, str(repo_root))
 
 from interventional_xro import build_env, rollout  # noqa: E402
-from utils.enso_classifier import _find_continuous_runs  # noqa: E402
+from utils.enso_classifier import (ONI_SMOOTH_MONTHS, _find_continuous_runs,
+                                   running_mean)  # noqa: E402
 from utils import suppress_warnings  # noqa: E402
 from utils.results_io import save_csv  # noqa: E402
 
@@ -68,9 +69,11 @@ def collect_events(env, var_names, state_std, n_runs, months, lead,
         _, states, enso = rollout(env, months, seed, action_idxs=None,
                                    magnitude=0.0, mode='press',
                                    state_std=state_std, return_states=True)
+        # Same centered three-month index used for retrospective event labels.
+        enso_oni = running_mean(enso, ONI_SMOOTH_MONTHS)
         phase_binary = {
-            'el_nino': (enso >= threshold).astype(int),
-            'la_nina': (enso <= -threshold).astype(int),
+            'el_nino': (enso_oni >= threshold).astype(int),
+            'la_nina': (enso_oni <= -threshold).astype(int),
         }
         for phase, binary in phase_binary.items():
             for start, _end, length in _find_continuous_runs(binary):

@@ -3,29 +3,45 @@ ENSO event classification utilities.
 """
 import numpy as np
 
+# Analysis-side ENSO index convention. ONI is a 3-month running mean of Nino3.4,
+# and the conventional event definition is built on it, so every *reported* event
+# statistic smooths before thresholding. The environment deliberately does NOT
+# import this: the XRO state evolves on monthly anomalies and the reward keys on
+# the raw monthly value, mirroring the XRO paper, which fits on monthly anomalies
+# but reports skill on the 3-month running mean (Zhao et al., Nature 630, 2024).
+ONI_SMOOTH_MONTHS = 3
 
-def max_run_length(binary_sequence):
+
+def running_mean(x, window=3, min_periods=1):
+    """Centered running mean for retrospective event analysis.
+
+    An odd window is required: window=3 averages t-1, t, t+1. At the
+    record boundaries, average available samples when min_periods permits;
+    min_periods=window requires a complete window. Training rewards use raw
+    monthly states and do not call this function.
     """
-    Calculates the longest duration of consecutive 1s in a binary sequence.
-    
-    Args:
-        binary_sequence (np.ndarray): Binary array of 0s and 1s
-        
-    Returns:
-        int: Maximum consecutive run length
-    """
-    padded = np.concatenate(([0], binary_sequence, [0]))
-    changes = np.diff(padded)
-    starts = np.where(changes == 1)[0]
-    ends = np.where(changes == -1)[0]
-    
-    if len(starts) == 0:
-        return 0
-    
-    return (ends - starts).max()
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 1:
+        raise ValueError(f"running_mean expects a 1-D series, got shape {x.shape}")
+    if not isinstance(window, (int, np.integer)) or window < 1 or window % 2 == 0:
+        raise ValueError("window must be a positive odd integer")
+    if not 1 <= min_periods <= window:
+        raise ValueError("min_periods must lie between 1 and window")
+    if window == 1:
+        return x.copy()
+    half = window // 2
+    indices = np.arange(len(x))
+    lo = np.maximum(indices - half, 0)
+    hi = np.minimum(indices + half + 1, len(x))
+    csum = np.concatenate(([0.0], np.cumsum(x)))
+    counts = hi - lo
+    out = (csum[hi] - csum[lo]) / counts
+    out[counts < min_periods] = np.nan
+    return out
 
 
-def classify_enso_event(enso_history, threshold=0.5, min_duration=12):
+def classify_enso_event(enso_history, threshold=0.5, min_duration=12,
+                        smooth_window=1):
     """
     Classifies each month in ENSO history into different event types.
 
@@ -33,6 +49,12 @@ def classify_enso_event(enso_history, threshold=0.5, min_duration=12):
         enso_history (list or np.ndarray): List/array of ENSO index values over time
         threshold (float): Magnitude threshold for El Nino/La Nina
         min_duration (int): Minimum months for multi-year event (>min_duration = multi-year)
+        smooth_window (int): Centered running-mean window applied to
+            ``enso_history`` BEFORE thresholding. The default 1 is the identity,
+            so existing callers are unaffected; analysis callers that want the
+            ONI convention pass ``ONI_SMOOTH_MONTHS``. Smoothing bridges
+            single-month dips, so runs merge and brief excursions are clipped --
+            it is not a monotone change to event counts.
 
     Returns:
         np.ndarray: Array of classifications for each month
@@ -41,6 +63,8 @@ def classify_enso_event(enso_history, threshold=0.5, min_duration=12):
     """
     enso_history = np.array(enso_history)
     n_months = len(enso_history)
+    if smooth_window > 1:
+        enso_history = running_mean(enso_history, smooth_window)
 
     # Initialize all as neutral
     classifications = np.array(['Neutral'] * n_months, dtype=object)

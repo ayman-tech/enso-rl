@@ -41,7 +41,8 @@ from config import EnvConfig
 from utils import suppress_warnings
 from utils.results_io import save_csv
 from utils.data_processing import load_observational_data, prepare_xro_parameters
-from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                   mye_fraction_by_phase)
 from envs import XROMultiYearEnv
 from XRO.core import XRO
 
@@ -112,7 +113,8 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
         if return_states:
             states.append(env.state.copy())
 
-    classified = classify_enso_event(enso_history, threshold=env.threshold)
+    classified = classify_enso_event(enso_history, threshold=env.threshold,
+                                     smooth_window=ONI_SMOOTH_MONTHS)
     fractions = mye_fraction_by_phase(classified)
     if return_states:
         return fractions, np.asarray(states), np.asarray(enso_history)

@@ -29,7 +29,8 @@ from stable_baselines3 import PPO
 from config import EnvConfig, WandbConfig
 from utils.nb_helper import _fdr
 from utils.data_processing import load_observational_data, prepare_xro_parameters
-from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                   mye_fraction_by_phase)
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
 from utils.results_io import save_csv
@@ -147,7 +148,8 @@ def simulate_counterfactual(env, model, num_months, seed,
         total_reward += reward
         enso_history.append(env.state[0])
 
-    classified = classify_enso_event(enso_history)
+    classified = classify_enso_event(enso_history, threshold=env.threshold,
+                                     smooth_window=ONI_SMOOTH_MONTHS)
     phase = mye_fraction_by_phase(classified)
 
     return {

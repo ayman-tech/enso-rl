@@ -16,7 +16,10 @@ def create_enso_table(enso_traj, threshold=0.5, start_month=0):
     (DJF=Jan, JFM=Feb, ..., NDJ=Dec).
 
     Args:
-        enso_traj (array): ENSO time series (already smooth / ONI)
+        enso_traj (array): ENSO index, expected to be the ONI series already
+            (a centered 3-month mean -- see utils.enso_classifier.running_mean).
+            Pass sim['enso_oni'], not sim['enso_traj']: the DJF..NDJ column
+            labels below only make sense for a 3-month-mean index.
         threshold (float): Threshold for coloring
         start_month (int): 0-based calendar month of the first value (0=Jan).
             With the env's month_offset, a rollout can start in any month, so we
@@ -131,7 +134,8 @@ def save_enso_table_html(enso_traj, output_path="plots/enso_table.html", thresho
     Save ENSO table as an interactive HTML file.
 
     Args:
-        enso_traj (array): ENSO time series (already ONI)
+        enso_traj (array): ENSO index, expected to be the ONI series already
+            (centered 3-month mean); pass sim['enso_oni'].
         output_path (str): Path to save HTML file
         threshold (float): Threshold for coloring
         wandb_enabled (bool): Log to W&B
@@ -190,7 +194,8 @@ def save_enso_table_matplotlib(enso_traj, output_path="plots/enso_table.png", th
     Save ENSO table as a PNG image using matplotlib.
 
     Args:
-        enso_traj (array): ENSO time series (already ONI)
+        enso_traj (array): ENSO index, expected to be the ONI series already
+            (centered 3-month mean); pass sim['enso_oni'].
         output_path (str): Path to save PNG file
         threshold (float): Threshold for coloring
         start_month (int): 0-based calendar month of the first value (see create_enso_table)
@@ -281,7 +286,8 @@ def log_enso_table_wandb(enso_traj, threshold=0.5, start_month=0):
     Log styled ENSO table directly to W&B as rendered HTML.
 
     Args:
-        enso_traj (array): ENSO time series (already ONI)
+        enso_traj (array): ENSO index, expected to be the ONI series already
+            (centered 3-month mean); pass sim['enso_oni'].
         threshold (float): Threshold for coloring
         start_month (int): 0-based calendar month of the first value (see create_enso_table)
     """

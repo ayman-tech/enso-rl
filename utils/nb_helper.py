@@ -186,14 +186,15 @@ def _load_npz(path):
 #         % 12, and 'agent_actions_raw' (policy output in [-1, 1]) stored alongside.
 #   v3 -- 'reward_config' recorded, so a file says which reward weights the run was
 #         trained under.
+#   v4 -- events are defined on the ONI convention: '*_mye_label' is computed from a
+#         TRAILING 3-month mean of Nino3.4, stored as '*_nino34_oni', with the window
+#         recorded in 'nino34_smooth_months'. '*_obs[..., 0]' remains RAW monthly.
 #
+#   v5 -- centered three-month event index; explicit smoothing alignment metadata.
 # WRITER version -- what inference.py stamps on new files.
-INFERENCE_SCHEMA = 3
-# READER gate -- the oldest version still safe to read. Deliberately NOT bumped to 3:
-# v2 files are correct, they merely lack the provenance fields, and
-# inference_reward_config() reports that absence explicitly. Only v1 is dangerous
-# (silently mis-scaled actions), which is the failure this gate exists for.
-MIN_INFERENCE_SCHEMA = 2
+INFERENCE_SCHEMA = 5
+# Reject old conventions rather than silently mixing event dates across analyses.
+MIN_INFERENCE_SCHEMA = 5
 
 
 def load_inference(path, require=MIN_INFERENCE_SCHEMA):
@@ -210,10 +211,28 @@ def load_inference(path, require=MIN_INFERENCE_SCHEMA):
             f"{path} is inference.npz schema v{version}, need v{require}.\n"
             f"  v1 scaled 'agent_actions' by step % 12 instead of the true calendar "
             f"month, and has no 'agent_actions_raw'.\n"
+            f"  v2/v3 defined events on the RAW monthly Nino3.4; v4 uses the ONI "
+            f"convention (trailing 3-month mean), so their event labels are not "
+            f"comparable. v5 uses centered means; v4 archives must be migrated.\n"
+            f"  Migrate v4: python scripts/analysis/center_inference.py {path}\n"
             f"  Regenerate it:  uv run scripts/analysis/inference.py --model <name>\n"
             f"  (models predating clip_mode need --clip-mode both --bounds-scale 1.0)"
         )
+    if version >= 5 and str(d['nino34_smooth_alignment']) != 'centered':
+        raise ValueError(f"{path}: schema v5 requires centered event smoothing")
     return d
+
+
+def inference_smooth_months(d):
+    """Running-mean window the event labels in `d` were computed with.
+
+    Returns 1 for files written before schema v4, where '*_mye_label' was
+    thresholded on the raw monthly index. Use this to assert which event
+    definition a figure is reading rather than assuming it.
+    """
+    if 'nino34_smooth_months' not in d.files:
+        return 1
+    return int(d['nino34_smooth_months'])
 
 
 def inference_reward_config(d):
