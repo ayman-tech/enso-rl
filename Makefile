@@ -1,7 +1,7 @@
 # Main runs
 .PHONY: train train-ensemble ensemble-robust inference shapley counterfactual shapley-robust counterfactual-robust
 # other runs
-.PHONY : precursor precursor-robust interventional interventional-robust
+.PHONY : precursor precursor-robust interventional interventional-robust timed-ablation
 # Pipelines
 .PHONY : xai-quick xai-robust train-quick train-robust full-quick full-robust 
 
@@ -45,6 +45,10 @@ counterfactual:
 	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 20 --months 1200 --no-wandb
 counterfactual-robust:
 	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 100 --months 1200 --no-wandb
+
+# Paired post-onset removal experiments; plotting stays in timed_ablation.ipynb.
+timed-ablation:
+	uv run scripts/analysis/timed_ablation.py --model $(name) --n-runs 30 --months 1200
 
 # --- Agent-free causal backbone + 3-method convergence figure ---
 # interventional_xro is agent-free; --model is a label so its output files alongside the ensemble's so `convergence` can find all three npz inputs.
