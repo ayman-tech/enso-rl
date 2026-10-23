@@ -117,6 +117,43 @@ def mye_fraction_by_phase(classified):
     }
 
 
+def mye_event_rate_by_phase(classified, spinup=12):
+    """Multi-year ENSO events per century, split by phase.
+
+    Counting companion to mye_fraction_by_phase: that one measures how many months
+    are spent in multi-year events (occupancy), this one how many events occur
+    (frequency). Matches the "Events per century" panel of Fig. 1
+    (paper/fig_drafts/make_fig1.py): an event is a continuous run of multi-year
+    months, and runs that start inside the first `spinup` months or are still
+    running at the last month are dropped, since their true onset or length is
+    unknown. 'total' counts runs of any multi-year label, so an El Nino that turns
+    straight into a La Nina with no neutral month between counts once there.
+
+    Args:
+        classified (np.ndarray): Output of classify_enso_event, ONE label per
+            simulated month. Callers drop the initial-state label first
+            (classified[1:]) so month indexing matches the inference archive.
+        spinup (int): Months at the start in which an event may not begin.
+
+    Returns:
+        dict: {'total', 'el_nino', 'la_nina'} events per 100 years.
+    """
+    classified = np.asarray(classified)
+    n = len(classified)
+    if n == 0:
+        return {'total': 0.0, 'el_nino': 0.0, 'la_nina': 0.0}
+    el_nino = classified == 'Multi-year El Nino'
+    la_nina = classified == 'Multi-year La Nina'
+    per_century = 1200.0 / n
+    out = {}
+    for phase, mask in (('total', el_nino | la_nina), ('el_nino', el_nino),
+                        ('la_nina', la_nina)):
+        runs = [r for r in _find_continuous_runs(mask.astype(int))
+                if r[0] >= spinup and r[1] < n - 1]
+        out[phase] = len(runs) * per_century
+    return out
+
+
 def _find_continuous_runs(binary_sequence):
     """
     Find all continuous runs of 1s in a binary sequence.

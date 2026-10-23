@@ -78,6 +78,26 @@ def _fdr(pvals):
     return np.clip(q, 0.0, 1.0).reshape(p.shape)
 
 
+def _ttest_zero_p(M):
+    """One-sample t-test p-values against zero, one per column of M [n_seeds, n_features].
+
+    A column with no spread across seeds has an undefined t statistic, so scipy
+    returns NaN -- and a single NaN makes _fdr return NaN for the WHOLE family.
+    That is common for integer metrics such as event counts, where a weak mode can
+    change the count by exactly 0 in every seed. Such columns get p = 1 when the
+    constant is 0 (no effect) and p = 0 when it is non-zero (the same effect in
+    every seed). All other columns are unchanged. Returns ones for a single seed.
+    """
+    from scipy.stats import ttest_1samp
+    M = np.asarray(M, float)
+    if M.shape[0] < 2:
+        return np.ones(M.shape[1])
+    p = np.array([ttest_1samp(M[:, fi], 0).pvalue for fi in range(M.shape[1])])
+    flat = np.ptp(M, axis=0) == 0
+    p[flat] = np.where(M[0, flat] == 0, 1.0, 0.0)
+    return p
+
+
 def _add_sig_labels(ax, x_positions, values, pvals, cis=None, offset_frac=0.05):
     """Annotate a bar chart with significance stars, clear of the error whiskers.
 

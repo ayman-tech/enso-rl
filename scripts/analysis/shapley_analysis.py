@@ -202,10 +202,12 @@ def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, see
     cutting the physics cost ~3x. Numerically it is identical to calling
     compute_metric_from_trajectory once per phase on the same trajectory.
 
-    Returns dict {'total', 'el_nino', 'la_nina'} of multi-year fractions.
+    Returns dict {'total', 'el_nino', 'la_nina'} of multi-year fractions, plus
+    {'count_total', 'count_el_nino', 'count_la_nina'} of multi-year events per
+    century, both read from the same classified rollout.
     """
     from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
-                                       mye_fraction_by_phase)
+                                       mye_event_rate_by_phase, mye_fraction_by_phase)
 
     obs, _ = env.reset(seed=seed)
     enso_history = [float(env.state[0])]
@@ -217,7 +219,11 @@ def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, see
 
     classified = classify_enso_event(np.asarray(enso_history), threshold=env.threshold,
                                      smooth_window=ONI_SMOOTH_MONTHS)
-    return mye_fraction_by_phase(classified)
+    out = mye_fraction_by_phase(classified)
+    # [1:] drops the initial-state label so month indexing matches inference.npz.
+    events = mye_event_rate_by_phase(classified[1:])
+    out.update({f'count_{k}': v for k, v in events.items()})
+    return out
 
 
 def compute_shapley_phases_for_seed(env, model, num_months, n_permutations, seed):
@@ -230,10 +236,11 @@ def compute_shapley_phases_for_seed(env, model, num_months, n_permutations, seed
     deterministic for a fixed seed, so it is computed once per permutation set
     instead of being re-simulated inside every permutation.
 
-    Returns dict {phase: shapley_array[9]}, phases = total / el_nino / la_nina.
+    Returns dict {phase: shapley_array[9]} for the occupancy phases
+    (total / el_nino / la_nina) and the event-count phases (COUNT_PHASES).
     """
     n_actions = 9
-    phases = tuple(PHASE_METRICS.keys())
+    phases = tuple(PHASE_METRICS.keys()) + COUNT_PHASES
     marginals = {p: np.zeros((n_permutations, n_actions)) for p in phases}
 
     # Baseline (empty coalition) is identical for a fixed seed -> compute once.
@@ -321,6 +328,10 @@ def compute_statistics(shapley_per_run, action_names):
 
 PHASE_METRICS = {'total': 'mye_prob', 'el_nino': 'mye_prob_el_nino',
                  'la_nina': 'mye_prob_la_nina'}
+# Event-frequency counterparts of the occupancy phases (events per century). Saved
+# under these names (mean_count_total, q_count_el_nino, ...) so the occupancy keys
+# stay unchanged.
+COUNT_PHASES = ('count_total', 'count_el_nino', 'count_la_nina')
 
 
 def _worker_shapley_ensemble(worker_args):
@@ -353,7 +364,7 @@ def _worker_shapley_ensemble(worker_args):
     except FileNotFoundError:
         return s, None
 
-    phases = list(PHASE_METRICS.keys())
+    phases = list(PHASE_METRICS.keys()) + list(COUNT_PHASES)
     feat = ACTION_NAMES
     sv_runs = {p: np.zeros((n_runs, len(feat))) for p in phases}
     for ri, es in enumerate(env_seeds):
@@ -377,9 +388,11 @@ def run_ensemble(args, output_dir):
     Saves shapley_ensemble.npz for the convergence figure (Part D).
     """
     from scipy.stats import t as t_dist
-    from utils.nb_helper import _fdr
+    from utils.nb_helper import _fdr, _ttest_zero_p
     phases = list(PHASE_METRICS.keys())
-    per_seed = {p: [] for p in phases}
+    count_phases = list(COUNT_PHASES)
+    all_phases = phases + count_phases
+    per_seed = {p: [] for p in all_phases}
     used = []
     feat = ACTION_NAMES
 
@@ -408,7 +421,7 @@ def run_ensemble(args, output_dir):
         if out is None:
             print(f"  [skip] models/{args.model}_seed{s}.zip not found", flush=True)
             continue
-        for p in phases:
+        for p in all_phases:
             per_seed[p].append(out[p])
         used.append(s)
         print(f"  seed={s} done", flush=True)
@@ -418,36 +431,38 @@ def run_ensemble(args, output_dir):
 
     n_seeds = len(used)
     save_kw = {'features': np.array(feat), 'phases': np.array(phases),
+               'count_phases': np.array(count_phases),
                'seeds': np.array(used), 'n_runs': args.n_runs,
                'months': args.months, 'n_permutations': args.n_permutations}
-    from scipy.stats import ttest_1samp
-    for p in phases:
+    for p in all_phases:
         M = np.vstack(per_seed[p])
         mean = M.mean(axis=0)
         ci = (t_dist.ppf(0.975, df=n_seeds - 1) * M.std(axis=0, ddof=1) / np.sqrt(n_seeds)
               if n_seeds > 1 else np.zeros_like(mean))
-        pvals = (np.array([ttest_1samp(M[:, fi], 0).pvalue for fi in range(M.shape[1])])
-                 if n_seeds > 1 else np.ones(M.shape[1]))
+        pvals = _ttest_zero_p(M)
         save_kw[f'mean_{p}'] = mean
         save_kw[f'ci_{p}'] = ci
         save_kw[f'p_{p}'] = pvals
         save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
 
-    # Benjamini-Hochberg across the WHOLE family (n_features x n_phases tests). One
+    # Benjamini-Hochberg across a WHOLE family (n_features x n_phases tests). One
     # test per (mode, phase) means raw p overstates significance across the family.
-    _P = np.vstack([save_kw[f'p_{p}'] for p in phases])
-    _Q = _fdr(_P)
-    for _i, p in enumerate(phases):
-        save_kw[f'q_{p}'] = _Q[_i]
-        print(f"\n  === Shapley ΔP(MYE) — {p} (N={n_seeds} seeds, BH-FDR) ===")
-        for fi in np.argsort(save_kw[f'mean_{p}'])[::-1]:
-            q = _Q[_i, fi]
-            sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
-            print(f"    {feat[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.5f} "
-                  f"± {save_kw[f'ci_{p}'][fi]:.5f}  p={save_kw[f'p_{p}'][fi]:.4f} "
-                  f"q={q:.4f}  {sig}")
-    print(f"\n  significant: raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
-          f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
+    # Occupancy and event count are corrected as two separate families: count is a
+    # secondary metric, and pooling it would weaken the occupancy results.
+    for family, label in ((phases, 'ΔP(MYE)'), (count_phases, 'Δ events/century')):
+        _P = np.vstack([save_kw[f'p_{p}'] for p in family])
+        _Q = _fdr(_P)
+        for _i, p in enumerate(family):
+            save_kw[f'q_{p}'] = _Q[_i]
+            print(f"\n  === Shapley {label} — {p} (N={n_seeds} seeds, BH-FDR) ===")
+            for fi in np.argsort(save_kw[f'mean_{p}'])[::-1]:
+                q = _Q[_i, fi]
+                sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
+                print(f"    {feat[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.5f} "
+                      f"± {save_kw[f'ci_{p}'][fi]:.5f}  p={save_kw[f'p_{p}'][fi]:.4f} "
+                      f"q={q:.4f}  {sig}")
+        print(f"\n  significant ({label}): raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
+              f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
     np.savez(output_dir / 'shapley_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'shapley_ensemble.npz'}")
@@ -466,6 +481,22 @@ def run_ensemble(args, output_dir):
                                       'shapley': float(save_kw[f'per_seed_{p}'][si, fi])})
     save_csv(output_dir / 'shapley_ensemble.csv', summary_rows)
     save_csv(output_dir / 'shapley_ensemble_per_seed.csv', per_seed_rows)
+
+    # Event-count results in their own CSVs, so the occupancy files keep their shape.
+    count_rows, count_seed_rows = [], []
+    for p in count_phases:
+        for fi, feature in enumerate(feat):
+            count_rows.append({'phase': p.removeprefix('count_'), 'feature': feature,
+                               'mean_shapley_events_per_century': float(save_kw[f'mean_{p}'][fi]),
+                               'ci95': float(save_kw[f'ci_{p}'][fi]),
+                               'p': float(save_kw[f'p_{p}'][fi]),
+                               'q_fdr': float(save_kw[f'q_{p}'][fi])})
+            for si, s in enumerate(used):
+                count_seed_rows.append({'phase': p.removeprefix('count_'), 'seed': int(s),
+                                        'feature': feature,
+                                        'shapley_events_per_century': float(save_kw[f'per_seed_{p}'][si, fi])})
+    save_csv(output_dir / 'shapley_ensemble_count.csv', count_rows)
+    save_csv(output_dir / 'shapley_ensemble_count_per_seed.csv', count_seed_rows)
 
 
 def main():
