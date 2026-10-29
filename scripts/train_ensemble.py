@@ -37,6 +37,8 @@ def _build_cmd(seed, args, train_script):
            "--name", name]
     if args.lr is not None:
         cmd += ["--lr", str(args.lr)]
+    if args.action_penalty is not None:
+        cmd += ["--action-penalty", str(args.action_penalty)]
     if args.no_wandb:
         cmd += ["--no-wandb"]
     return name, cmd
@@ -72,6 +74,9 @@ def main():
     parser.add_argument("--total-timesteps", type=int, default=240_000,
                         help="Total training timesteps per agent")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate override")
+    parser.add_argument("--action-penalty", type=float, default=None,
+                        help="Control-effort weight for every agent in the ensemble "
+                             "(see scripts/train.py --action-penalty).")
     parser.add_argument("--prefix", type=str, default="ensemble_model",
                         help="Model name prefix; saved as models/<prefix>_seed<seed>")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")

@@ -1,7 +1,7 @@
 # Main runs
 .PHONY: train train-ensemble ensemble-robust inference shapley counterfactual shapley-robust counterfactual-robust
 # other runs
-.PHONY : precursor precursor-robust interventional interventional-robust
+.PHONY : precursor precursor-robust interventional interventional-robust timed-ablation
 # Pipelines
 .PHONY : xai-quick xai-robust train-quick train-robust full-quick full-robust 
 
@@ -12,17 +12,28 @@ name ?= model
 # Training duration (env steps; 1 step = 1 month). Overridable per-invocation, and
 # set per-pipeline by train-quick / train-robust below.
 total_timesteps ?= 1200000
+# Control-effort weight (reward_config.action_penalty_weight). Unset = config default
+# (0.05), which gives maximal multi-year persistence. 0.6 gives ~48% multi-year-event
+# months, close to observed variability.
+action_penalty ?=
+AP := $(if $(action_penalty),--action-penalty $(action_penalty),)
+# Parallel agents / seeds at once. Unset = each script's default (cpu_count-2, itself
+# capped at the number of seeds). Set it on a cluster: multiprocessing.cpu_count()
+# reports the NODE's cores, not your --cpus-per-task allocation, so a 30-seed
+# ensemble-robust on a 16-CPU allocation would oversubscribe ~2x.
+workers ?=
+WORKERS := $(if $(workers),--workers $(workers),)
 
 train:
-	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name)
+	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) $(AP)
 ensemble-quick:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) --no-wandb
 ensemble-robust:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
-	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200
+	uv run scripts/analysis/inference.py --model $(name) --n-rollouts 30 --months 1200 $(WORKERS)
 
 # =============== X-AI methods ================
 shapley:
@@ -34,6 +45,10 @@ counterfactual:
 	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 20 --months 1200 --no-wandb
 counterfactual-robust:
 	uv run scripts/analysis/counterfactual_analysis.py --model $(name) --n-runs 100 --months 1200 --no-wandb
+
+# Paired post-onset removal experiments; plotting stays in timed_ablation.ipynb.
+timed-ablation:
+	uv run scripts/analysis/timed_ablation.py --model $(name) --n-runs 30 --months 1200
 
 # --- Agent-free causal backbone + 3-method convergence figure ---
 # interventional_xro is agent-free; --model is a label so its output files alongside the ensemble's so `convergence` can find all three npz inputs.
@@ -65,19 +80,19 @@ xai-robust:
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps)
-	$(MAKE) inference name=$(name)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) action_penalty=$(action_penalty) workers=$(workers)
+	$(MAKE) inference name=$(name) workers=$(workers)
 
 train-robust:
-	$(MAKE) ensemble-robust name=$(name)
+	$(MAKE) ensemble-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) inference-robust name=$(name)
 
 full-quick:
-	$(MAKE) train-quick name=$(name)
+	$(MAKE) train-quick name=$(name) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) xai-quick name=$(name)
 
 full-robust:
-	$(MAKE) train-robust name=$(name)
+	$(MAKE) train-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers)
 	$(MAKE) xai-robust name=$(name)
 
 

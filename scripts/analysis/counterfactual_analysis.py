@@ -27,9 +27,10 @@ sys.path.insert(0, str(repo_root))
 # importable until repo_root is added.
 from stable_baselines3 import PPO
 from config import EnvConfig, WandbConfig
-from utils.nb_helper import _fdr
+from utils.nb_helper import _fdr, _ttest_zero_p
 from utils.data_processing import load_observational_data, prepare_xro_parameters
-from utils.enso_classifier import classify_enso_event, mye_fraction_by_phase
+from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                   mye_event_rate_by_phase, mye_fraction_by_phase)
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
 from utils.results_io import save_csv
@@ -129,7 +130,8 @@ def simulate_counterfactual(env, model, num_months, seed,
         zero_idx: Action index to set to zero (classic ablation)
 
     Returns:
-        dict with avg_reward and mye_prob
+        dict with avg_reward, mye_prob (occupancy) and mye_events (events per
+        century), each also split by phase.
     """
     obs, _ = env.reset(seed=seed)
     total_reward = 0.0
@@ -147,14 +149,20 @@ def simulate_counterfactual(env, model, num_months, seed,
         total_reward += reward
         enso_history.append(env.state[0])
 
-    classified = classify_enso_event(enso_history)
+    classified = classify_enso_event(enso_history, threshold=env.threshold,
+                                     smooth_window=ONI_SMOOTH_MONTHS)
     phase = mye_fraction_by_phase(classified)
+    # [1:] drops the initial-state label so month indexing matches inference.npz.
+    events = mye_event_rate_by_phase(classified[1:])
 
     return {
         'avg_reward': total_reward / num_months,
         'mye_prob': phase['total'],
         'mye_prob_el_nino': phase['el_nino'],
         'mye_prob_la_nina': phase['la_nina'],
+        'mye_events': events['total'],
+        'mye_events_el_nino': events['el_nino'],
+        'mye_events_la_nina': events['la_nina'],
     }
 
 
@@ -284,9 +292,16 @@ def _phase_keys():
     return ['total', 'el_nino', 'la_nina']
 
 
+# Event-frequency counterparts of the occupancy phases. Saved under these names
+# (mean_count_total, q_count_el_nino, ...) so the occupancy keys stay unchanged.
+COUNT_PHASES = ['count_total', 'count_el_nino', 'count_la_nina']
+
+
 def _phase_field(result, phase):
     return {'total': 'mye_prob', 'el_nino': 'mye_prob_el_nino',
-            'la_nina': 'mye_prob_la_nina'}[phase]
+            'la_nina': 'mye_prob_la_nina',
+            'count_total': 'mye_events', 'count_el_nino': 'mye_events_el_nino',
+            'count_la_nina': 'mye_events_la_nina'}[phase]
 
 
 def _worker_counterfactual(worker_args):
@@ -316,16 +331,18 @@ def _worker_counterfactual(worker_args):
 
 
 def seed_mean_delta_by_phase(env, model, var_names, num_months, n_runs, master_seed):
-    """One trained model: mean zero-ablation ΔP(MYE) per feature per phase.
+    """One trained model: mean zero-ablation effect per feature per phase.
 
     Zero-ablation (disable mode j's action) is the cleanest causal contrast for
     the convergence figure. Paired by seed (baseline vs ablation share the seed).
+    Both metrics are read from the same pair of rollouts: ΔP(MYE) under the
+    occupancy phases and Δ events per century under COUNT_PHASES.
     Returns dict phase -> np.ndarray[n_features].
     """
     rng = np.random.default_rng(master_seed)
     seeds = [int(rng.integers(0, 2**31)) for _ in range(n_runs)]
     n_features = len(var_names) - 1
-    phases = _phase_keys()
+    phases = _phase_keys() + COUNT_PHASES
     deltas = {p: np.zeros((n_runs, n_features)) for p in phases}
 
     for ri, seed in enumerate(seeds):
@@ -347,7 +364,8 @@ def run_ensemble(args, output_dir):
     """
     from scipy.stats import t as t_dist
     phases = _phase_keys()
-    per_seed = {p: [] for p in phases}  # each: list over seeds of [n_features]
+    all_phases = phases + COUNT_PHASES
+    per_seed = {p: [] for p in all_phases}  # each: list over seeds of [n_features]
     controllable = None
     used = []
 
@@ -374,7 +392,7 @@ def run_ensemble(args, output_dir):
             continue
         if controllable is None:
             controllable = controllable_s
-        for p in phases:
+        for p in all_phases:
             per_seed[p].append(seed_means[p])
         used.append(s)
         print(f"  seed={s}: total ΔP top driver "
@@ -385,35 +403,37 @@ def run_ensemble(args, output_dir):
 
     n_seeds = len(used)
     save_kw = {'features': np.array(controllable), 'phases': np.array(phases),
+               'count_phases': np.array(COUNT_PHASES),
                'seeds': np.array(used), 'n_runs': args.n_runs, 'months': args.months}
-    from scipy.stats import ttest_1samp
-    for p in phases:
+    for p in all_phases:
         M = np.vstack(per_seed[p])  # [n_seeds, n_features]
         mean = M.mean(axis=0)
         ci = (t_dist.ppf(0.975, df=n_seeds - 1) * M.std(axis=0, ddof=1) / np.sqrt(n_seeds)
               if n_seeds > 1 else np.zeros_like(mean))
-        pvals = (np.array([ttest_1samp(M[:, fi], 0).pvalue for fi in range(M.shape[1])])
-                 if n_seeds > 1 else np.ones(M.shape[1]))
+        pvals = _ttest_zero_p(M)
         save_kw[f'mean_{p}'] = mean
         save_kw[f'ci_{p}'] = ci
         save_kw[f'p_{p}'] = pvals
         save_kw[f'per_seed_{p}'] = M  # [n_seeds, n_features] — for seed-stability plots
 
-    # Benjamini-Hochberg across the WHOLE family (n_features x n_phases tests). One
+    # Benjamini-Hochberg across a WHOLE family (n_features x n_phases tests). One
     # test per (mode, phase) means raw p overstates significance across the family.
-    _P = np.vstack([save_kw[f'p_{p}'] for p in phases])
-    _Q = _fdr(_P)
-    for _i, p in enumerate(phases):
-        save_kw[f'q_{p}'] = _Q[_i]
-        print(f"\n  === Counterfactual ΔP(MYE) — {p} (N={n_seeds} seeds, BH-FDR) ===")
-        for fi in np.argsort(save_kw[f'mean_{p}']):
-            q = _Q[_i, fi]
-            sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
-            print(f"    {controllable[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.4f} "
-                  f"± {save_kw[f'ci_{p}'][fi]:.4f}  p={save_kw[f'p_{p}'][fi]:.4f} "
-                  f"q={q:.4f}  {sig}")
-    print(f"\n  significant: raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
-          f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
+    # Occupancy and event count are corrected as two separate families: count is a
+    # secondary metric, and pooling it would weaken the occupancy results.
+    for family, label in ((phases, 'ΔP(MYE)'), (COUNT_PHASES, 'Δ events/century')):
+        _P = np.vstack([save_kw[f'p_{p}'] for p in family])
+        _Q = _fdr(_P)
+        for _i, p in enumerate(family):
+            save_kw[f'q_{p}'] = _Q[_i]
+            print(f"\n  === Counterfactual {label} — {p} (N={n_seeds} seeds, BH-FDR) ===")
+            for fi in np.argsort(save_kw[f'mean_{p}']):
+                q = _Q[_i, fi]
+                sig = "***" if q < 0.001 else "**" if q < 0.01 else "*" if q < 0.05 else "ns"
+                print(f"    {controllable[fi]:<10} {save_kw[f'mean_{p}'][fi]:+.4f} "
+                      f"± {save_kw[f'ci_{p}'][fi]:.4f}  p={save_kw[f'p_{p}'][fi]:.4f} "
+                      f"q={q:.4f}  {sig}")
+        print(f"\n  significant ({label}): raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
+              f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
     np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
@@ -432,6 +452,22 @@ def run_ensemble(args, output_dir):
                                       'dP_MYE': float(save_kw[f'per_seed_{p}'][si, fi])})
     save_csv(output_dir / 'counterfactual_ensemble.csv', summary_rows)
     save_csv(output_dir / 'counterfactual_ensemble_per_seed.csv', per_seed_rows)
+
+    # Event-count results in their own CSVs, so the occupancy files keep their shape.
+    count_rows, count_seed_rows = [], []
+    for p in COUNT_PHASES:
+        for fi, feat in enumerate(controllable):
+            count_rows.append({'phase': p.removeprefix('count_'), 'feature': feat,
+                               'mean_dEvents_per_century': float(save_kw[f'mean_{p}'][fi]),
+                               'ci95': float(save_kw[f'ci_{p}'][fi]),
+                               'p': float(save_kw[f'p_{p}'][fi]),
+                               'q_fdr': float(save_kw[f'q_{p}'][fi])})
+            for si, s in enumerate(used):
+                count_seed_rows.append({'phase': p.removeprefix('count_'), 'seed': int(s),
+                                        'feature': feat,
+                                        'dEvents_per_century': float(save_kw[f'per_seed_{p}'][si, fi])})
+    save_csv(output_dir / 'counterfactual_ensemble_count.csv', count_rows)
+    save_csv(output_dir / 'counterfactual_ensemble_count_per_seed.csv', count_seed_rows)
 
 
 def main():

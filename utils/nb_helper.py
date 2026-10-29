@@ -7,6 +7,7 @@ Imported by both:
 
 Keeping these here avoids duplicating the setup logic across the two notebooks.
 """
+import json
 import warnings
 from pathlib import Path
 
@@ -75,6 +76,26 @@ def _fdr(pvals):
     q[order] = np.minimum.accumulate(
         (flat[order] * n / np.arange(1, n + 1))[::-1])[::-1]
     return np.clip(q, 0.0, 1.0).reshape(p.shape)
+
+
+def _ttest_zero_p(M):
+    """One-sample t-test p-values against zero, one per column of M [n_seeds, n_features].
+
+    A column with no spread across seeds has an undefined t statistic, so scipy
+    returns NaN -- and a single NaN makes _fdr return NaN for the WHOLE family.
+    That is common for integer metrics such as event counts, where a weak mode can
+    change the count by exactly 0 in every seed. Such columns get p = 1 when the
+    constant is 0 (no effect) and p = 0 when it is non-zero (the same effect in
+    every seed). All other columns are unchanged. Returns ones for a single seed.
+    """
+    from scipy.stats import ttest_1samp
+    M = np.asarray(M, float)
+    if M.shape[0] < 2:
+        return np.ones(M.shape[1])
+    p = np.array([ttest_1samp(M[:, fi], 0).pvalue for fi in range(M.shape[1])])
+    flat = np.ptp(M, axis=0) == 0
+    p[flat] = np.where(M[0, flat] == 0, 1.0, 0.0)
+    return p
 
 
 def _add_sig_labels(ax, x_positions, values, pvals, cis=None, offset_frac=0.05):
@@ -178,15 +199,25 @@ def _load_npz(path):
     return np.load(path, allow_pickle=True)
 
 
-# inference.npz schema. Bumped to 2 when the month-offset action bug was fixed:
+# inference.npz schema history:
 #   v1 -- 'agent_actions' scaled by step % 12 (WRONG for any rollout not starting in
 #         January, i.e. ~90% of them); no 'agent_actions_raw'.
 #   v2 -- 'agent_actions' scaled at the TRUE calendar month (step + rollout_start_month)
 #         % 12, and 'agent_actions_raw' (policy output in [-1, 1]) stored alongside.
-INFERENCE_SCHEMA = 2
+#   v3 -- 'reward_config' recorded, so a file says which reward weights the run was
+#         trained under.
+#   v4 -- events are defined on the ONI convention: '*_mye_label' is computed from a
+#         TRAILING 3-month mean of Nino3.4, stored as '*_nino34_oni', with the window
+#         recorded in 'nino34_smooth_months'. '*_obs[..., 0]' remains RAW monthly.
+#
+#   v5 -- centered three-month event index; explicit smoothing alignment metadata.
+# WRITER version -- what inference.py stamps on new files.
+INFERENCE_SCHEMA = 5
+# Reject old conventions rather than silently mixing event dates across analyses.
+MIN_INFERENCE_SCHEMA = 5
 
 
-def load_inference(path, require=INFERENCE_SCHEMA):
+def load_inference(path, require=MIN_INFERENCE_SCHEMA):
     """Load inference.npz, refusing schema versions with the month-offset action bug.
 
     The dangerous direction is an old npz read by a migrated notebook: the actions
@@ -200,10 +231,39 @@ def load_inference(path, require=INFERENCE_SCHEMA):
             f"{path} is inference.npz schema v{version}, need v{require}.\n"
             f"  v1 scaled 'agent_actions' by step % 12 instead of the true calendar "
             f"month, and has no 'agent_actions_raw'.\n"
+            f"  v2/v3 defined events on the RAW monthly Nino3.4; v4 uses the ONI "
+            f"convention (trailing 3-month mean), so their event labels are not "
+            f"comparable. v5 uses centered means; v4 archives must be migrated.\n"
+            f"  Migrate v4: python scripts/analysis/center_inference.py {path}\n"
             f"  Regenerate it:  uv run scripts/analysis/inference.py --model <name>\n"
             f"  (models predating clip_mode need --clip-mode both --bounds-scale 1.0)"
         )
+    if version >= 5 and str(d['nino34_smooth_alignment']) != 'centered':
+        raise ValueError(f"{path}: schema v5 requires centered event smoothing")
     return d
+
+
+def inference_smooth_months(d):
+    """Running-mean window the event labels in `d` were computed with.
+
+    Returns 1 for files written before schema v4, where '*_mye_label' was
+    thresholded on the raw monthly index. Use this to assert which event
+    definition a figure is reading rather than assuming it.
+    """
+    if 'nino34_smooth_months' not in d.files:
+        return 1
+    return int(d['nino34_smooth_months'])
+
+
+def inference_reward_config(d):
+    """Reward weights the run used; {} for files written before schema v3.
+
+    An empty dict means "not recorded", NOT "no penalties" -- a v2 file was produced
+    before the field existed and says nothing about which reward trained the model.
+    """
+    if 'reward_config' not in d.files:
+        return {}
+    return json.loads(str(d['reward_config']))
 
 
 def _median_iqr(arr, axis=0):

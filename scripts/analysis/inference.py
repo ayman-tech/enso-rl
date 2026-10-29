@@ -9,7 +9,9 @@ without re-running simulation.
 Output: plots/{model}/inference.npz
 
 npz arrays:
-  schema_version      scalar (=2)               see utils.nb_helper.load_inference
+  schema_version      scalar (=3)               see utils.nb_helper.load_inference
+  reward_config       scalar str (JSON)         the full reward weights of this run;
+                                                 read via nb_helper.inference_reward_config
   var_names           [10]                      XRO mode names (Nino3.4 … SASD)
   action_names        [9]                       forcing mode names (var_names[1:])
   seeds               [n_seeds]                 model seed indices used
@@ -27,6 +29,10 @@ npz arrays:
                                                  physical units
   agent_actions_raw   [n_seeds, n_rollouts, T, 9]   policy output, in [-1, 1]
   agent_mye_label     [n_seeds, n_rollouts, T]       int8 MYE category (see below)
+  agent_nino34_oni    [n_seeds, n_rollouts, T]       Nino3.4 as a centered
+                                                 nino34_smooth_months mean -- the
+                                                 series agent_mye_label was computed
+                                                 from. agent_obs[..., 0] stays RAW.
 
 Action scaling invariant (schema v2):
   agent_actions[s, r, t, m]
@@ -42,6 +48,18 @@ Action scaling invariant (schema v2):
 
   base_obs            [n_seeds, n_rollouts, T, 10]  baseline (no agent) state
   base_mye_label      [n_seeds, n_rollouts, T]
+  base_nino34_oni     [n_seeds, n_rollouts, T]
+  nino34_smooth_months scalar (=3)               ONI convention: events are defined on
+                                                 a centered 3-month mean of Nino3.4.
+                                                 Recorded so a consumer can assert which
+                                                 convention produced the labels.
+
+Which series to use (schema v5):
+  Event statistics  -> *_mye_label / *_nino34_oni   (ONI, centered 3-month mean)
+  Dynamical         -> *_obs[..., 0]                (RAW monthly)
+  Use raw monthly series for spectra, cross-spectral phase leads and coherence.
+  Lifecycle composites may show the centered Niño3.4 index to match event onset;
+  label this explicitly and retain raw monthly values for the other modes.
 
 MYE label encoding:
   0 = Neutral
@@ -51,7 +69,8 @@ MYE label encoding:
   4 = Multi-year La Niña
 
 Notebook recipes:
-  nino34_agent  = d['agent_obs'][:, :, :, 0]          # Nino3.4 time series
+  nino34_agent  = d['agent_obs'][:, :, :, 0]          # RAW monthly Nino3.4
+  nino34_oni    = d['agent_nino34_oni']                # ONI index behind the labels
   tna_agent     = d['agent_obs'][:, :, :, var_names.index('TNA')]
   mye_mask      = d['agent_mye_label'] >= 3            # any MYE month
   lift_per_roll = mye_mask.mean(-1) - (d['base_mye_label'] >= 3).mean(-1)
@@ -67,6 +86,7 @@ Usage:
 Seeds are auto-detected from all existing models/{model}_seed*.zip files.
 """
 import sys
+import json
 import time
 import argparse
 import numpy as np
@@ -77,7 +97,8 @@ from pathlib import Path
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from utils.model_io import load_environment
+from utils.model_io import load_environment, resolve_env_config, envconfig_path
+from utils.enso_classifier import ONI_SMOOTH_MONTHS
 from utils.evaluation import simulate_trajectory
 from utils import suppress_warnings
 from utils.seeding import discover_seeds
@@ -138,8 +159,10 @@ def _worker_seed(wargs):
     a_act = np.zeros((n_r, T,  9), dtype=np.float32)
     a_raw = np.zeros((n_r, T,  9), dtype=np.float32)
     a_mye = np.zeros((n_r, T),     dtype=np.int8)
+    a_oni = np.zeros((n_r, T),     dtype=np.float32)
     b_obs = np.zeros((n_r, T, 10), dtype=np.float32)
     b_mye = np.zeros((n_r, T),     dtype=np.int8)
+    b_oni = np.zeros((n_r, T),     dtype=np.float32)
     a_start = np.zeros(n_r,        dtype=np.int8)  # 0-based calendar month of step 0
 
     for ri, rs in enumerate(r_seeds):
@@ -149,15 +172,19 @@ def _worker_seed(wargs):
         a_act[ri] = sim_a['actions_traj'].astype(np.float32)
         a_raw[ri] = sim_a['raw_actions_traj'].astype(np.float32)
         a_mye[ri] = _encode_classified(sim_a['classified_event_array'])
+        # [1:] to match states_traj/actions alignment, as for the labels.
+        a_oni[ri] = sim_a['enso_oni'][1:].astype(np.float32)
         b_obs[ri] = sim_b['states_traj'][1:].astype(np.float32)
         b_mye[ri] = _encode_classified(sim_b['classified_event_array'])
+        b_oni[ri] = sim_b['enso_oni'][1:].astype(np.float32)
         # agent & baseline share the same seed -> same start month; record once.
         a_start[ri] = sim_a['month_offset']
 
     af = (a_mye >= 3).mean() * 100
     bf = (b_mye >= 3).mean() * 100
     print(f"  [seed {seed}] done — agent={af:.1f}%  base={bf:.1f}%  lift={af-bf:+.1f}%", flush=True)
-    return si, seed, vnames, a_obs, a_act, a_raw, a_mye, b_obs, b_mye, a_start
+    return (si, seed, vnames, a_obs, a_act, a_raw, a_mye, a_oni,
+            b_obs, b_mye, b_oni, a_start)
 
 
 def main():
@@ -200,7 +227,29 @@ def main():
     out_path = Path(args.out) if args.out else output_dir / "inference.npz"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    env_config = EnvConfig()
+    # Config the models were TRAINED under, from the sidecar written by train.py.
+    # Falls back (with a warning) to current defaults for models that predate it.
+    first_model = f"{args.model}_seed{valid_seeds[0]}"
+    env_config = resolve_env_config(first_model)
+    cfg_source = (str(envconfig_path(first_model))
+                  if envconfig_path(first_model).exists() else "EnvConfig() defaults")
+
+    # An ensemble whose seeds disagree on the physics is not an ensemble.
+    for seed in valid_seeds[1:]:
+        other_path = envconfig_path(f"{args.model}_seed{seed}")
+        if not other_path.exists():
+            continue
+        other = resolve_env_config(f"{args.model}_seed{seed}")
+        mismatched = {k: (getattr(env_config, k), getattr(other, k))
+                      for k in ("clip_mode", "bounds_scale")
+                      if getattr(env_config, k) != getattr(other, k)}
+        if mismatched:
+            parser.error(
+                f"seed {valid_seeds[0]} and seed {seed} of '{args.model}' were trained "
+                f"under different settings: {mismatched}. Averaging them is meaningless.")
+
+    # Explicit flags override the sidecar (and are the only way to set these for
+    # pre-sidecar models).
     if args.bounds_scale is not None:
         if args.bounds_scale < 1.0:
             parser.error("--bounds-scale must be >= 1.0")
@@ -218,6 +267,9 @@ def main():
     print(f"  months     = {args.months}")
     print(f"  clip_mode  = {env_config.clip_mode}")
     print(f"  bounds     = {env_config.bounds_scale}x")
+    print(f"  lambda     = {env_config.reward_config['action_penalty_weight']}"
+          f"  (action_penalty_weight)")
+    print(f"  env config = {cfg_source}")
     print(f"  output     = {out_path}")
     print()
 
@@ -230,8 +282,10 @@ def main():
     agent_actions   = np.zeros((n_seeds, n_r, T,  9), dtype=np.float32)
     agent_actions_raw = np.zeros((n_seeds, n_r, T, 9), dtype=np.float32)
     agent_mye_label = np.zeros((n_seeds, n_r, T),     dtype=np.int8)
+    agent_nino34_oni = np.zeros((n_seeds, n_r, T),    dtype=np.float32)
     base_obs        = np.zeros((n_seeds, n_r, T, 10), dtype=np.float32)
     base_mye_label  = np.zeros((n_seeds, n_r, T),     dtype=np.int8)
+    base_nino34_oni = np.zeros((n_seeds, n_r, T),     dtype=np.float32)
     rollout_seeds   = np.zeros((n_seeds, n_r),         dtype=np.int64)
     rollout_start_month = np.zeros((n_seeds, n_r),     dtype=np.int8)  # 0-based calendar month of step 0
 
@@ -260,15 +314,18 @@ def main():
 
     # Assemble per-seed results into the pre-allocated arrays (by seed index).
     var_names = None
-    for si, seed, vnames, a_obs, a_act, a_raw, a_mye, b_obs, b_mye, a_start in results:
+    for (si, seed, vnames, a_obs, a_act, a_raw, a_mye, a_oni,
+         b_obs, b_mye, b_oni, a_start) in results:
         if var_names is None:
             var_names = vnames
         agent_obs[si]       = a_obs
         agent_actions[si]   = a_act
         agent_actions_raw[si] = a_raw
         agent_mye_label[si] = a_mye
+        agent_nino34_oni[si] = a_oni
         base_obs[si]        = b_obs
         base_mye_label[si]  = b_mye
+        base_nino34_oni[si] = b_oni
         rollout_start_month[si] = a_start
 
     _print_summary(valid_seeds, agent_mye_label, base_mye_label)
@@ -286,6 +343,7 @@ def main():
         spinup=SPINUP,
         bounds_scale=env_config.bounds_scale,
         clip_mode=env_config.clip_mode,
+        reward_config=json.dumps(env_config.reward_config, sort_keys=True),
         # The [9,12] scale THIS run used. Recorded because EnvConfig.action_scale can
         # change between runs (it was halved historically), and without it a consumer
         # silently rescales old files with today's table.
@@ -294,8 +352,15 @@ def main():
         agent_actions=agent_actions,
         agent_actions_raw=agent_actions_raw,
         agent_mye_label=agent_mye_label,
+        agent_nino34_oni=agent_nino34_oni,
         base_obs=base_obs,
         base_mye_label=base_mye_label,
+        base_nino34_oni=base_nino34_oni,
+        # Provenance for the event definition. Without this a consumer cannot tell
+        # which convention produced *_mye_label, which is exactly how a stale file
+        # slips through unnoticed.
+        nino34_smooth_months=ONI_SMOOTH_MONTHS,
+        nino34_smooth_alignment="centered",
     )
     print(f"\nSaved → {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
 

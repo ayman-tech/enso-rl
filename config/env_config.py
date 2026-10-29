@@ -68,7 +68,8 @@ class EnvConfig:
 
     # Reward structure parameters (matches _calculate_reward in xro_env.py)
     reward_config: Dict = field(default_factory=lambda: {
-        # Control-effort cost, -w * sum(a^2). 
+        # Control-effort cost, -w * sum(a^2). 0.05 allows maximal multi-year persistence
+        #0.60 only nudges events nature already started. Override/run with args.
         "action_penalty_weight": 0.05,
         "duration_reward_0_6m": 0.1,
         "duration_reward_7_12m": 0.3,

@@ -35,6 +35,7 @@ from config import EnvConfig
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
+from utils.enso_classifier import ONI_SMOOTH_MONTHS, running_mean
 from utils.evaluation import simulate_trajectory
 from XRO.core import XRO
 
@@ -102,18 +103,26 @@ def collect_single_trajectory(env, model, num_months, seed):
     return sim['raw_actions_traj'], sim['states_traj'][1:, 0]
 
 
-def classify_nino34(nino34, threshold=0.5):
+def classify_nino34(nino34, threshold=0.5, smooth_window=None):
     """
     Classify Nino3.4 into ENSO categories.
 
+    Uses the same ONI-convention index and the same inclusive comparisons as
+    utils.enso_classifier.classify_enso_event. This function previously smoothed
+    nothing and used strict > / <, so a value sitting exactly on the threshold fell
+    on the opposite side of the one every other site put it.
+
     Returns:
-      0 = La Nina (< -threshold)
+      0 = La Nina (<= -threshold)
       1 = Neutral
-      2 = El Nino (> threshold)
+      2 = El Nino (>= threshold)
     """
+    if smooth_window is None:
+        smooth_window = ONI_SMOOTH_MONTHS
+    nino34 = running_mean(nino34, smooth_window)
     classes = np.ones(len(nino34), dtype=int)
-    classes[nino34 > threshold] = 2
-    classes[nino34 < -threshold] = 0
+    classes[nino34 >= threshold] = 2
+    classes[nino34 <= -threshold] = 0
     return classes
 
 
