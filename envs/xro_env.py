@@ -61,14 +61,19 @@ class XROMultiYearEnv(gym.Env):
             dtype=np.float32
         )
         
+        # Event class the reward targets and the index its counter runs on 
+        self.target_event = params.get('target_event', 'multi')
+        self.reward_index = params.get('reward_index', 'raw')
+
         # Observation space: State (10D) + month (1D) + ENSO-event duration (1D)
         # = n_modes + 2. (Phase sign is omitted: it is just thresholded Nino3.4,
         # already in state[0], so it adds no information without gap-tolerant
         # event tracking. Re-add it alongside any grace/gap logic.)
+        # oni_lag1 appends the previous month's Nino3.4
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.n_modes + 2,),
+            shape=(self.n_modes + 2 + (self.reward_index == 'oni_lag1'),),
             dtype=np.float32
         )
         
@@ -88,8 +93,12 @@ class XROMultiYearEnv(gym.Env):
         # Saturation caps for the two soft-constraint penalties. See _calculate_reward / _realism_penalty for the tanh ramp.
         self.duration_penalty_cap = reward_config.get('duration_penalty_cap', 5.0)
         self.realism_penalty_cap = reward_config.get('realism_penalty_cap', 3.0)
-        # Scale for the duration feature in the observation (months); ~1.0 at 2 years.
-        self._duration_norm = 24.0
+        # Duration staircase as [max_k, reward]; last max_k None = open-ended.
+        self.duration_bands = reward_config.get(
+            'duration_bands', [[6, 0.1], [12, 0.3], [None, 1.0]])
+        # Scale for the duration feature in the observation (months); ~1.0 at the
+        # end of the target band (2 years multi-year, 1 year single-year).
+        self._duration_norm = 12.0 if self.target_event == 'single' else 24.0
 
         # State-plausibility (Mahalanobis) reference from observed climatology.
         # Catches extreme/implausible single states; the duration ramp above
@@ -176,10 +185,12 @@ class XROMultiYearEnv(gym.Env):
         month_feature = ((self.current_step + self.month_offset) % 12) / 12.0
         duration_feature = self.consecutive_enso_months / self._duration_norm
         norm_state = (self.state - self._state_mean) / self._state_std
-        return np.concatenate(
-            [norm_state, [month_feature, duration_feature]],
-            dtype=np.float32,
-        )
+        extra = [month_feature, duration_feature]
+        if self.reward_index == 'oni_lag1':
+            # Previous month's Nino3.4 (the current value at reset, when none exists) z-scored like state[0].
+            prev = self.enso_history[-2] if len(self.enso_history) > 1 else self.state[0]
+            extra.append((prev - self._state_mean[0]) / self._state_std[0])
+        return np.concatenate([norm_state, extra], dtype=np.float32)
 
     def step(self, action):
         """
@@ -221,7 +232,12 @@ class XROMultiYearEnv(gym.Env):
         Returns:
             float: Reward value
         """
-        enso_index = self.state[0]
+        if self.reward_index == 'oni_lag1':
+            # Centred ONI of month t-1 = mean of raw Nino3.4 at t-2..t. Near reset,
+            # average what exists, as running_mean does at record boundaries.
+            enso_index = float(np.mean(self.enso_history[-3:]))
+        else:
+            enso_index = self.state[0]
         threshold = self.threshold
 
         # Initialize reward components
@@ -255,12 +271,12 @@ class XROMultiYearEnv(gym.Env):
         # a temporal failure the per-state Mahalanobis term cannot detect.
         duration_penalty = 0.0
         if self.consecutive_enso_months > 0:
-            if self.consecutive_enso_months <= 6:
-                duration_reward = 0.1    # very soft: event just starting
-            elif self.consecutive_enso_months <= 12:
-                duration_reward = 0.3     # soft: approaching multi-year
-            else:
-                duration_reward = 1.0     # multi-year event (>=13 months)
+            # Staircase from duration_bands. Multi-year default: 0.1 (months 1-6),
+            # 0.3 (7-12), 1.0 (13+). Single-year: 0.1, 1.0 (6-12), 0 beyond.
+            for max_k, band_reward in self.duration_bands:
+                if max_k is None or self.consecutive_enso_months <= max_k:
+                    duration_reward = band_reward
+                    break
 
             # Phase-specific over-persistence penalty. Saturating (tanh) ramp: slope
             # ~= duration_penalty_rate near the ceiling , asymptoting at

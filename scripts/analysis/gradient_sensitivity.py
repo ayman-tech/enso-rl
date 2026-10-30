@@ -25,6 +25,7 @@ sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
 from config import EnvConfig
+from utils.model_io import resolve_env_config
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
@@ -267,10 +268,14 @@ def main():
     print("GRADIENT-BASED SENSITIVITY ANALYSIS (Robust Multi-Run)")
     print("=" * 70)
 
-    env_config = EnvConfig()
+    env_config = resolve_env_config(args.model)
     model, env, var_names = load_environment(args.model, env_config)
     action_names = list(var_names[1:])
-    obs_names = list(var_names) + ['Month']
+    # One name per observation feature (see XROMultiYearEnv._get_obs); oni_lag1
+    # envs append the previous month's Nino3.4.
+    obs_names = list(var_names) + ['Month', 'Duration']
+    if env_config.reward_index == 'oni_lag1':
+        obs_names.append('Nino34_lag1')
     n_obs = len(obs_names)
 
     # Generate shared seeds from master RNG

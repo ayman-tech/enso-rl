@@ -58,7 +58,16 @@ class EnvConfig:
     ])
 
     # Observation space dimension
-    obs_dim: int = 12  # 10 variables + month + ENSO-event duration
+    obs_dim: int = 12  # 10 variables + month + ENSO-event duration (+1 lag for oni_lag1)
+
+    # Which event class the reward targets: "multi" (> 12 months) or "single" (6-12 months)
+    target_event: str = "multi"
+
+    # Index the reward's event counter runs on:
+    #   "raw"      -- monthly Nino3.4 (multi-year runs). Stricter than the ONI
+    #                 classifier, so it can only undercount multi-year events.
+    #   "oni_lag1" -- centred 3-month ONI of month t-1
+    reward_index: str = "raw"
 
     # Action space dimension
     action_dim: int = 9
@@ -71,9 +80,8 @@ class EnvConfig:
         # Control-effort cost, -w * sum(a^2). 0.05 allows maximal multi-year persistence
         #0.60 only nudges events nature already started. Override/run with args.
         "action_penalty_weight": 0.05,
-        "duration_reward_0_6m": 0.1,
-        "duration_reward_7_12m": 0.3,
-        "duration_reward_13m_plus": 1.0,  # full reward in the multi-year band
+        # Duration staircase as [max_k, reward] pairs; the last max_k is None (open-ended).
+        "duration_bands": [[6, 0.1], [12, 0.3], [None, 1.0]],
         # Phase-specific duration ceilings (months). Beyond the ceiling a soft
         # linear penalty ramps up to discourage *unrealistic persistence* — a
         # temporal failure mode the per-state Mahalanobis term cannot catch.
@@ -149,3 +157,32 @@ class EnvConfig:
             raise ValueError(f"clip_mode must be both/pre/post/none, got {self.clip_mode!r}")
         if self.bounds_scale < 1.0:
             raise ValueError("bounds_scale must be >= 1.0 (1.0 = observed envelope)")
+        if self.target_event not in ("multi", "single"):
+            raise ValueError(f"target_event must be multi/single, got {self.target_event!r}")
+        if self.reward_index not in ("raw", "oni_lag1"):
+            raise ValueError(f"reward_index must be raw/oni_lag1, got {self.reward_index!r}")
+        expected_obs = 12 + (self.reward_index == "oni_lag1")
+        if self.obs_dim != expected_obs:
+            raise ValueError(f"obs_dim must be {expected_obs} for reward_index="
+                             f"{self.reward_index!r}, got {self.obs_dim}")
+
+
+def apply_single_year_preset(env_config: EnvConfig) -> EnvConfig:
+    """Retarget an EnvConfig at single-year events (6-12 months), in place.
+    
+    Only the target band moves; penalty rate/cap, realism penalty and the control
+    cost are left as they are, so differences from the multi-year agents come from
+    the target, not the reward shape. Call before save_env_config so the sidecar
+    records the resolved values.
+    """
+    env_config.target_event = "single"
+    env_config.reward_index = "oni_lag1"
+    env_config.obs_dim = 13
+    rc = env_config.reward_config
+    # Zero beyond 12 months: a 1.0 band there would still pay net +0.30 in month 13
+    # against the penalty ramp's first -0.70, pulling events into the multi-year class.
+    rc["duration_bands"] = [[5, 0.1], [12, 1.0], [None, 0.0]]
+    rc["duration_ceiling_el_nino"] = 12
+    rc["duration_ceiling_la_nina"] = 12
+    env_config.__post_init__()
+    return env_config

@@ -27,6 +27,7 @@ sys.path.insert(0, str(repo_root))
 # importable until repo_root is added.
 from stable_baselines3 import PPO
 from config import EnvConfig, WandbConfig
+from utils.model_io import resolve_env_config
 from utils.nb_helper import _fdr, _ttest_zero_p
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
@@ -151,9 +152,9 @@ def simulate_counterfactual(env, model, num_months, seed,
 
     classified = classify_enso_event(enso_history, threshold=env.threshold,
                                      smooth_window=ONI_SMOOTH_MONTHS)
-    phase = mye_fraction_by_phase(classified)
+    phase = mye_fraction_by_phase(classified, target=env.target_event)
     # [1:] drops the initial-state label so month indexing matches inference.npz.
-    events = mye_event_rate_by_phase(classified[1:])
+    events = mye_event_rate_by_phase(classified[1:], target=env.target_event)
 
     return {
         'avg_reward': total_reward / num_months,
@@ -318,7 +319,8 @@ def _worker_counterfactual(worker_args):
     from utils import suppress_warnings
     suppress_warnings()
 
-    env_config = EnvConfig()
+    # The config the model was trained under (target event, reward index, obs size).
+    env_config = resolve_env_config(model_name)
     try:
         model, env, var_names = load_environment(model_name, env_config)
     except FileNotFoundError:
@@ -435,6 +437,10 @@ def run_ensemble(args, output_dir):
         print(f"\n  significant ({label}): raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
               f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
+    # Event class the occupancy deltas score, from the trained models' sidecar.
+    from utils.model_io import resolve_env_config
+    save_kw['target_event'] = resolve_env_config(
+        f"{args.model}_seed{args.seeds[0]}").target_event
     np.savez(output_dir / 'counterfactual_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'counterfactual_ensemble.npz'}")
 

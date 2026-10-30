@@ -58,9 +58,13 @@ GROUPS = {
 }
 
 
-def build_env():
-    """Construct the XRO env directly (no agent/model needed)."""
-    cfg = EnvConfig()
+def build_env(target='multi'):
+    """Construct the XRO env directly (no agent/model needed).
+
+    target sets only which event class rollouts are scored on ('multi' or
+    'single'); with no agent, the reward settings play no part.
+    """
+    cfg = EnvConfig(target_event=target)
     _, train_ds, var_names, bounds = load_observational_data(
         cfg.data_config['data_path'],
         cfg.data_config['train_start'],
@@ -115,7 +119,7 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
 
     classified = classify_enso_event(enso_history, threshold=env.threshold,
                                      smooth_window=ONI_SMOOTH_MONTHS)
-    fractions = mye_fraction_by_phase(classified)
+    fractions = mye_fraction_by_phase(classified, target=env.target_event)
     if return_states:
         return fractions, np.asarray(states), np.asarray(enso_history)
     return fractions
@@ -126,10 +130,10 @@ def rollout(env, num_months, seed, action_idxs=None, magnitude=0.0,
 _WORKER_ENV = {}
 
 
-def _init_worker():
+def _init_worker(target):
     """Pool initializer: build the XRO env once per worker process."""
     suppress_warnings()
-    env, var_names, state_std = build_env()
+    env, var_names, state_std = build_env(target)
     _WORKER_ENV['env'] = env
     _WORKER_ENV['var_names'] = var_names
     _WORKER_ENV['state_std'] = state_std
@@ -194,7 +198,8 @@ def paired_delta(env, targets, var_names, n_runs, months, magnitude, mode,
     if n_workers > 1:
         print(f"  Parallel across {len(tasks)} (target,sign) tasks with "
               f"{n_workers} workers", flush=True)
-        with mp.Pool(processes=n_workers, initializer=_init_worker) as pool:
+        with mp.Pool(processes=n_workers, initializer=_init_worker,
+                     initargs=(env.target_event,)) as pool:
             results = pool.map(_worker_target_sign, tasks)
     else:
         print("  Serial (workers=1)", flush=True)
@@ -248,6 +253,8 @@ def main():
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel workers across (target,sign) tasks "
                              "(default: cpu_count - 2; 1 = serial)")
+    parser.add_argument("--target", choices=("multi", "single"), default="multi",
+                        help="Event class the occupancy deltas are scored on")
     args = parser.parse_args()
 
     suppress_warnings()
@@ -259,7 +266,7 @@ def main():
     print("=" * 70)
     start = time.time()
 
-    env, var_names, state_std = build_env()
+    env, var_names, state_std = build_env(args.target)
     modes = list(var_names[1:])
 
     # Targets: singles (each mode alone) + physically-motivated groups
@@ -293,6 +300,7 @@ def main():
         p=np.array([r['p'] for r in rows]),
         mode=args.mode, direction=args.direction, magnitude=args.magnitude,
         n_runs=args.n_runs, months=args.months, seeds=np.array(seeds),
+        target_event=args.target,
     )
     print(f"  Saved {output_dir / 'interventional_xro.npz'}")
 

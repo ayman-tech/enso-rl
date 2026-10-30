@@ -39,6 +39,7 @@ from stable_baselines3 import PPO
 
 # Import configurations and utilities
 from config import EnvConfig
+from utils.model_io import resolve_env_config
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from utils.evaluation import evaluate_agent, simulate_trajectory
 from utils.visualization import (
@@ -149,8 +150,9 @@ def run_basic_evaluation(model, env, num_months=240, wandb_enabled=False,
     print("\n" + "-"*70)
     print("Results:")
     print("-"*70)
-    print(f"Multi-year events with agent:    {prob_with_agent:.2%}")
-    print(f"Multi-year events (baseline):    {prob_baseline:.2%}")
+    cls = "Single-year" if getattr(env, "target_event", "multi") == "single" else "Multi-year"
+    print(f"{cls + ' events with agent:':<33}{prob_with_agent:.2%}")
+    print(f"{cls + ' events (baseline):':<33}{prob_baseline:.2%}")
     print(f"Improvement:                     {improvement:+.2f} percentage points")
     print(f"Improvement ratio:               {ratio:.2f}x")
     print("-"*70)
@@ -364,7 +366,8 @@ def run_trajectory_analysis(model, env, var_names, num_months=240, threshold=0.5
     print(f"Duration:                 {sim['no_months']} months ({sim['no_months']/12:.1f} years)")
     print(f"Classified event:         {sim['classified_event']}")
     print(f"Average reward:           {sim['avg_reward']:.4f}")
-    print(f"Multi-year event prob:    {sim['mye_probability']:.2%}")
+    cls = "Single-year" if getattr(env, "target_event", "multi") == "single" else "Multi-year"
+    print(f"{cls + ' event prob:':<26}{sim['mye_probability']:.2%}")
     print(f"Elapsed time:             {sim['elapsed_time']:.2f}s")
     print("-"*70)
     
@@ -461,7 +464,7 @@ def main():
         wandb_enabled = not args.no_wandb
         
         # Load environment
-        env_config = EnvConfig()
+        env_config = resolve_env_config(args.model)
         if args.bounds_scale is not None:
             if args.bounds_scale < 1.0:
                 parser.error("--bounds-scale must be >= 1.0")

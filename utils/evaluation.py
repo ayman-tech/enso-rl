@@ -6,6 +6,15 @@ from config.env_config import EnvConfig
 from utils.actions import scale_actions
 
 
+def env_target(env):
+    """Event class the env's reward targets ('multi' or 'single').
+
+    Every occupancy metric below scores this class, so an agent is never scored on
+    the class it was not trained for. Envs predating target_event are multi-year.
+    """
+    return getattr(getattr(env, 'unwrapped', env), 'target_event', 'multi')
+
+
 def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False,
                    seed=None):
     """
@@ -26,7 +35,8 @@ def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False,
         float: Probability of multi-year events (percentage of months in 24+ month
             events). If return_reward=True, returns (mye_probability, mean_reward).
     """
-    from utils.enso_classifier import classify_enso_event
+    from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
+                                       mye_fraction_by_phase)
 
     enso_history = []
     obs, _ = env.reset(seed=seed)
@@ -44,9 +54,14 @@ def evaluate_agent(env, agent=None, continuous_steps=6000, return_reward=False,
         enso_history.append(env.state[0])
 
     # Classify events and calculate multi-year probability
-    classified = classify_enso_event(enso_history, threshold=env.threshold, min_duration=12)
-    mye_months = np.sum((classified == 'Multi-year El Nino') | (classified == 'Multi-year La Nina'))
-    mye_probability = mye_months / len(classified)
+    # Multi-year runs keep the raw monthly index (the shipped m1 checkpoints were
+    # selected on it). Single-year runs use the ONI: on the raw index a one-month dip
+    # splits an event, so selection would favour policies that game dips.
+    target = env_target(env)
+    classified = classify_enso_event(
+        enso_history, threshold=env.threshold, min_duration=12,
+        smooth_window=ONI_SMOOTH_MONTHS if target == 'single' else 1)
+    mye_probability = mye_fraction_by_phase(classified, target=target)['total']
 
     if return_reward:
         return mye_probability, total_reward / continuous_steps
@@ -85,7 +100,7 @@ def rollout_mye_phased(env, agent=None, num_months=1200, seed=None):
 
     classified = classify_enso_event(enso_history, threshold=env.threshold,
                                      smooth_window=ONI_SMOOTH_MONTHS)
-    return mye_fraction_by_phase(classified)
+    return mye_fraction_by_phase(classified, target=env_target(env))
 
 
 def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration=12,
@@ -125,12 +140,20 @@ def rollout_mye_events(env, agent=None, num_months=1200, seed=None, min_duration
     # and durations below cannot drift from `frac`.
     enso = running_mean(enso_history, smooth_window)
     thr = env.threshold
-    frac = mye_fraction_by_phase(classify_enso_event(enso, threshold=thr))
+    target = env_target(env)
+    frac = mye_fraction_by_phase(classify_enso_event(enso, threshold=thr), target=target)
+
+    # Same run-length rule as classify_enso_event: multi-year > min_duration,
+    # single-year 6..min_duration.
+    if target == 'single':
+        in_class = lambda length: 6 <= length <= min_duration
+    else:
+        in_class = lambda length: length > min_duration
 
     out = {}
     binmap = {'el_nino': (enso >= thr).astype(int), 'la_nina': (enso <= -thr).astype(int)}
     for ph, b in binmap.items():
-        durs = [length for _s, _e, length in _find_continuous_runs(b) if length > min_duration]
+        durs = [length for _s, _e, length in _find_continuous_runs(b) if in_class(length)]
         out[ph] = {'frac': frac[ph], 'count': len(durs), 'durations': durs}
     out['total'] = {'frac': frac['total'],
                     'count': out['el_nino']['count'] + out['la_nina']['count'],
@@ -174,7 +197,8 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     """
     import time
     from utils.enso_classifier import (ONI_SMOOTH_MONTHS, classify_enso_event,
-                                       running_mean, summarize_classification)
+                                       running_mean, summarize_classification,
+                                       target_labels)
 
     if smooth_window is None:
         smooth_window = ONI_SMOOTH_MONTHS
@@ -254,9 +278,11 @@ def simulate_trajectory(env, agent=None, num_months=6000, disable_control_for_id
     classified_event = summarize_classification(classified_event_array)
     avg_reward = total_rewards / num_months
     
-    # Calculate MYE probability as percentage of months in multi-year events
-    mye_months = np.sum((classified_event_array == 'Multi-year El Nino') | 
-                        (classified_event_array == 'Multi-year La Nina'))
+    # Fraction of months in events of the env's target class (multi-year unless
+    # the agent was trained for single-year events).
+    target_nino, target_nina = target_labels(env_target(env))
+    mye_months = np.sum((classified_event_array == target_nino) |
+                        (classified_event_array == target_nina))
     mye_prob = mye_months / len(classified_event_array)
 
     # Apply the month-indexed scaling once, at the TRUE calendar month the physics

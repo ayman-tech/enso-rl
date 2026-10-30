@@ -23,13 +23,16 @@ AP := $(if $(action_penalty),--action-penalty $(action_penalty),)
 # ensemble-robust on a 16-CPU allocation would oversubscribe ~2x.
 workers ?=
 WORKERS := $(if $(workers),--workers $(workers),)
+# Event class the reward targets: multi (> 12 months, the m1 setup) or single (6-12 months).
+target ?= multi
+TARGET := --target $(target)
 
 train:
-	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) $(AP)
+	uv run scripts/train.py --total-timesteps $(total_timesteps) --name $(name) $(AP) $(TARGET)
 ensemble-quick:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 10 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) $(TARGET) --no-wandb
 ensemble-robust:
-	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) --no-wandb
+	uv run scripts/train_ensemble.py --prefix $(name) --n-seeds 30 --total-timesteps $(total_timesteps) $(AP) $(WORKERS) $(TARGET) --no-wandb
 
 # --- Inference: paired rollouts → raw per-step npz (lift + seasonality) ---
 inference:
@@ -53,47 +56,47 @@ timed-ablation:
 # --- Agent-free causal backbone + 3-method convergence figure ---
 # interventional_xro is agent-free; --model is a label so its output files alongside the ensemble's so `convergence` can find all three npz inputs.
 interventional:
-	uv run scripts/analysis/interventional_xro.py --model $(name) --n-runs 30 --months 1200
+	uv run scripts/analysis/interventional_xro.py --model $(name) --n-runs 30 --months 1200 $(TARGET)
 interventional-robust:
-	uv run scripts/analysis/interventional_xro.py --model $(name) --n-runs 50 --months 1200 --mode press --direction both
+	uv run scripts/analysis/interventional_xro.py --model $(name) --n-runs 50 --months 1200 --mode press --direction both $(TARGET)
 
 
 # ================== Other Analysis ===================
 # precursor_composite is agent-free (no model); validates drivers vs spontaneous MYE (2.1).
 precursor:
-	uv run scripts/analysis/precursor_composite.py --model $(name) --n-runs 30 --months 1200 --lead 24
+	uv run scripts/analysis/precursor_composite.py --model $(name) --n-runs 30 --months 1200 --lead 24 $(TARGET)
 precursor-robust:
-	uv run scripts/analysis/precursor_composite.py --model $(name) --n-runs 100 --months 2400 --lead 24
+	uv run scripts/analysis/precursor_composite.py --model $(name) --n-runs 100 --months 2400 --lead 24 $(TARGET)
 
 # Aggregate result pipelines (run on an already-trained ensemble: name=<prefix>)
 
 xai-quick:
 	$(MAKE) counterfactual name=$(name)
 	$(MAKE) shapley name=$(name)
-	$(MAKE) interventional name=$(name)
+	$(MAKE) interventional name=$(name) target=$(target)
 xai-robust:
 	$(MAKE) counterfactual-robust name=$(name)
 	$(MAKE) shapley-robust name=$(name)
-	$(MAKE) interventional-robust name=$(name)
+	$(MAKE) interventional-robust name=$(name) target=$(target)
 
 # quick = shorter training for fast pipeline validation/iteration + light inference.
 # robust = longer training for convergence (publication model) + heavy inference.
 # 240k was undertrained (policy_std still falling, KL/clip rising), so robust >> quick.
 train-quick:
-	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) action_penalty=$(action_penalty) workers=$(workers)
+	$(MAKE) ensemble-quick name=$(name) total_timesteps=$(total_timesteps) action_penalty=$(action_penalty) workers=$(workers) target=$(target)
 	$(MAKE) inference name=$(name) workers=$(workers)
 
 train-robust:
-	$(MAKE) ensemble-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers)
-	$(MAKE) inference-robust name=$(name)
+	$(MAKE) ensemble-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers) target=$(target)
+	$(MAKE) inference name=$(name) workers=$(workers)
 
 full-quick:
-	$(MAKE) train-quick name=$(name) action_penalty=$(action_penalty) workers=$(workers)
-	$(MAKE) xai-quick name=$(name)
+	$(MAKE) train-quick name=$(name) action_penalty=$(action_penalty) workers=$(workers) target=$(target)
+	$(MAKE) xai-quick name=$(name) target=$(target)
 
 full-robust:
-	$(MAKE) train-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers)
-	$(MAKE) xai-robust name=$(name)
+	$(MAKE) train-robust name=$(name) action_penalty=$(action_penalty) workers=$(workers) target=$(target)
+	$(MAKE) xai-robust name=$(name) target=$(target)
 
 
 # ============================== ARCHIVED ================================

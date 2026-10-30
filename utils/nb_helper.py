@@ -35,6 +35,18 @@ PHASE_MASKS = {
     'el_nino': lambda l: l == 3,
     'la_nina': lambda l: l == 4,
 }
+# Same masks for single-year archives (1 = Single-year El Niño, 2 = La Niña). Pick
+# with phase_masks(d['target_event']) so a notebook scores the class trained for.
+SY_PHASE_MASKS = {
+    'total':   lambda l: (l == 1) | (l == 2),
+    'el_nino': lambda l: l == 1,
+    'la_nina': lambda l: l == 2,
+}
+
+
+def phase_masks(target='multi'):
+    """Label masks for an archive's target class ('multi' or 'single')."""
+    return SY_PHASE_MASKS if str(target) == 'single' else PHASE_MASKS
 
 
 def _zscore(x):

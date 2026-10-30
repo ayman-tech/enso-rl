@@ -4,6 +4,7 @@ Main training script for ENSO RL agent.
 Usage (normal and Full customizable run):
     uv run scripts/train.py --total-timesteps 240000 --name "ppo-train"
     uv run scripts/train.py --total-timesteps 240000 --name "ppo-train" --lr 0.0001 --no-wandb --debug
+    uv run scripts/train.py --total-timesteps 240000 --name "s1" --target single
 """
 import sys
 import io
@@ -26,7 +27,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Import configurations and utilities
-from config import TrainConfig, EnvConfig, WandbConfig
+from config import TrainConfig, EnvConfig, WandbConfig, apply_single_year_preset
 from utils import suppress_warnings, timer
 from utils.model_io import save_env_config
 from utils.seeding import SeedBundle, resolve_seeds, model_name
@@ -107,6 +108,11 @@ def initialize_wandb(wandb_config: WandbConfig, train_config: TrainConfig, env_c
         "clip_mode": env_config.clip_mode,
         "action_penalty_weight": env_config.reward_config["action_penalty_weight"],
         "enso_threshold": env_config.threshold,
+        "target_event": env_config.target_event,
+        "reward_index": env_config.reward_index,
+        "duration_bands": env_config.reward_config.get("duration_bands"),
+        "duration_ceiling_el_nino": env_config.reward_config["duration_ceiling_el_nino"],
+        "duration_ceiling_la_nina": env_config.reward_config["duration_ceiling_la_nina"],
         "debug_mode": train_config.debug_mode,
         "learning_rate": train_config.learning_rate,
         "gamma": train_config.gamma,
@@ -325,6 +331,10 @@ def main():
                         help="Control-effort weight (reward_config.action_penalty_weight). "
                              "Default 0.05 = maximal persistence; 0.60 gives ~48%% "
                              "multi-year-event months, close to observed variability.")
+    parser.add_argument("--target", choices=("multi", "single"), default="multi",
+                        help="Event class the reward targets. 'single' applies "
+                             "apply_single_year_preset (6-12 month band, ONI(t-1) "
+                             "counter, 13-feature observation).")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument("--name", type=str, default="train-run", help="Name of WandB training Run")
     args = parser.parse_args()
@@ -349,6 +359,8 @@ def main():
         train_config.learning_rate = args.lr
     if args.action_penalty is not None:
         env_config.reward_config["action_penalty_weight"] = args.action_penalty
+    if args.target == "single":
+        apply_single_year_preset(env_config)
     if args.no_wandb:
         wandb_config.mode = "disabled"
 
@@ -377,6 +389,7 @@ def main():
     print(f"Seeds: {seeds.as_log_dict()}")
     print(f"Model name: {save_name}")
     print(f"Action penalty (lambda): {env_config.reward_config['action_penalty_weight']}")
+    print(f"Target event: {env_config.target_event} (reward index: {env_config.reward_index})")
     print(f"Env config: {cfg_path}")
     
     try:

@@ -32,6 +32,7 @@ sys.path.insert(0, str(repo_root))
 
 from stable_baselines3 import PPO
 from config import EnvConfig
+from utils.model_io import resolve_env_config
 from utils.data_processing import load_observational_data, prepare_xro_parameters
 from envs import XROMultiYearEnv
 from utils import suppress_warnings
@@ -296,7 +297,7 @@ def main():
     print("MUTUAL INFORMATION ANALYSIS (Robust Multi-Run)")
     print("=" * 70)
 
-    env_config = EnvConfig()
+    env_config = resolve_env_config(args.model)
     model, env, var_names = load_environment(args.model, env_config)
     action_names = list(var_names[1:])
     n_actions = len(action_names)

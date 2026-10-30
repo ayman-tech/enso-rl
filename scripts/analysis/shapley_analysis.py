@@ -38,13 +38,15 @@ METRIC_LABELS = {
 }
 
 
-def compute_metric_from_trajectory(enso_history, threshold, metric):
+def compute_metric_from_trajectory(enso_history, threshold, metric, target='multi'):
     """Compute a scalar metric from an ENSO trajectory.
 
     Args:
         enso_history: List/array of Nino3.4 values
         threshold: ENSO event threshold
         metric: One of 'mye_prob', 'enso_months'
+        target: Event class 'mye_prob*' scores ('multi' or 'single'; see
+            EnvConfig.target_event)
 
     Returns:
         float: Metric value
@@ -56,7 +58,7 @@ def compute_metric_from_trajectory(enso_history, threshold, metric):
     if metric in ('mye_prob', 'mye_prob_el_nino', 'mye_prob_la_nina'):
         classified = classify_enso_event(enso, threshold=threshold,
                                          smooth_window=ONI_SMOOTH_MONTHS)
-        phase = mye_fraction_by_phase(classified)
+        phase = mye_fraction_by_phase(classified, target=target)
         return {'mye_prob': phase['total'], 'mye_prob_el_nino': phase['el_nino'],
                 'mye_prob_la_nina': phase['la_nina']}[metric]
 
@@ -83,7 +85,10 @@ def load_environment(model_path: str):
     from envs import XROMultiYearEnv
     from XRO.core import XRO
 
-    env_config = EnvConfig()
+    from utils.model_io import resolve_env_config
+
+    # The config the model was trained under (target event, reward index, obs size).
+    env_config = resolve_env_config(model_path)
     model_path_str = model_path
     if not model_path_str.endswith('.zip'):
         model_path_str += '.zip'
@@ -144,7 +149,8 @@ def simulate_with_coalition(env, model, coalition_mask, num_months, seed, metric
     if metric == 'avg_reward':
         return total_reward / num_months
 
-    return compute_metric_from_trajectory(enso_history, env.threshold, metric)
+    return compute_metric_from_trajectory(enso_history, env.threshold, metric,
+                                          target=env.target_event)
 
 
 def compute_shapley_for_seed(env, model, num_months, n_permutations, seed, metric='mye_prob'):
@@ -219,9 +225,9 @@ def simulate_coalition_phase_metrics(env, model, coalition_mask, num_months, see
 
     classified = classify_enso_event(np.asarray(enso_history), threshold=env.threshold,
                                      smooth_window=ONI_SMOOTH_MONTHS)
-    out = mye_fraction_by_phase(classified)
+    out = mye_fraction_by_phase(classified, target=env.target_event)
     # [1:] drops the initial-state label so month indexing matches inference.npz.
-    events = mye_event_rate_by_phase(classified[1:])
+    events = mye_event_rate_by_phase(classified[1:], target=env.target_event)
     out.update({f'count_{k}': v for k, v in events.items()})
     return out
 
@@ -464,6 +470,10 @@ def run_ensemble(args, output_dir):
         print(f"\n  significant ({label}): raw p<0.05 = {(_P < 0.05).sum()}/{_P.size}  ->  "
               f"BH-FDR q<0.05 = {(_Q < 0.05).sum()}/{_Q.size}")
 
+    # Event class the occupancy deltas score, from the trained models' sidecar.
+    from utils.model_io import resolve_env_config
+    save_kw['target_event'] = resolve_env_config(
+        f"{args.model}_seed{args.seeds[0]}").target_event
     np.savez(output_dir / 'shapley_ensemble.npz', **save_kw)
     print(f"\n  Saved {output_dir / 'shapley_ensemble.npz'}")
 

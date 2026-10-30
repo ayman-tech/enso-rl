@@ -128,16 +128,19 @@ def _encode_classified(classified_array):
 # discover_seeds now lives in utils.seeding (shared with shapley/counterfactual).
 
 
-def _print_summary(seeds_used, agent_mye_label, base_mye_label):
+def _print_summary(seeds_used, agent_mye_label, base_mye_label, target='multi'):
+    # Codes of the target class: 3/4 multi-year, 1/2 single-year (see _LABEL_MAP).
+    codes = [1, 2] if target == 'single' else [3, 4]
+    tag = 'SYE' if target == 'single' else 'MYE'
     print(f"\n{'='*55}")
-    print(f"{'Seed':>6} | {'Agent MYE%':>10} | {'Base MYE%':>10} | {'Lift':>8}")
+    print(f"{'Seed':>6} | {'Agent ' + tag + '%':>10} | {'Base ' + tag + '%':>10} | {'Lift':>8}")
     print(f"{'-'*55}")
     for si, seed in enumerate(seeds_used):
-        a_frac = (agent_mye_label[si] >= 3).mean() * 100
-        b_frac = (base_mye_label[si] >= 3).mean() * 100
+        a_frac = np.isin(agent_mye_label[si], codes).mean() * 100
+        b_frac = np.isin(base_mye_label[si], codes).mean() * 100
         print(f"{seed:>6} | {a_frac:>10.1f}% | {b_frac:>10.1f}% | {a_frac - b_frac:>+7.1f}%")
-    overall_a = (agent_mye_label >= 3).mean() * 100
-    overall_b = (base_mye_label >= 3).mean() * 100
+    overall_a = np.isin(agent_mye_label, codes).mean() * 100
+    overall_b = np.isin(base_mye_label, codes).mean() * 100
     print(f"{'all':>6} | {overall_a:>10.1f}% | {overall_b:>10.1f}% | {overall_a - overall_b:>+7.1f}%")
     print(f"{'='*55}")
 
@@ -180,8 +183,9 @@ def _worker_seed(wargs):
         # agent & baseline share the same seed -> same start month; record once.
         a_start[ri] = sim_a['month_offset']
 
-    af = (a_mye >= 3).mean() * 100
-    bf = (b_mye >= 3).mean() * 100
+    codes = [1, 2] if env.target_event == 'single' else [3, 4]
+    af = np.isin(a_mye, codes).mean() * 100
+    bf = np.isin(b_mye, codes).mean() * 100
     print(f"  [seed {seed}] done — agent={af:.1f}%  base={bf:.1f}%  lift={af-bf:+.1f}%", flush=True)
     return (si, seed, vnames, a_obs, a_act, a_raw, a_mye, a_oni,
             b_obs, b_mye, b_oni, a_start)
@@ -241,7 +245,8 @@ def main():
             continue
         other = resolve_env_config(f"{args.model}_seed{seed}")
         mismatched = {k: (getattr(env_config, k), getattr(other, k))
-                      for k in ("clip_mode", "bounds_scale")
+                      for k in ("clip_mode", "bounds_scale", "target_event",
+                                "reward_index")
                       if getattr(env_config, k) != getattr(other, k)}
         if mismatched:
             parser.error(
@@ -328,7 +333,8 @@ def main():
         base_nino34_oni[si] = b_oni
         rollout_start_month[si] = a_start
 
-    _print_summary(valid_seeds, agent_mye_label, base_mye_label)
+    _print_summary(valid_seeds, agent_mye_label, base_mye_label,
+                   target=env_config.target_event)
 
     np.savez(
         out_path,
@@ -344,6 +350,10 @@ def main():
         bounds_scale=env_config.bounds_scale,
         clip_mode=env_config.clip_mode,
         reward_config=json.dumps(env_config.reward_config, sort_keys=True),
+        # Event class the agents were trained for; *_mye_label keeps all five
+        # classes either way (1/2 single-year, 3/4 multi-year).
+        target_event=env_config.target_event,
+        reward_index=env_config.reward_index,
         # The [9,12] scale THIS run used. Recorded because EnvConfig.action_scale can
         # change between runs (it was halved historically), and without it a consumer
         # silently rescales old files with today's table.

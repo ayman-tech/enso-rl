@@ -14,6 +14,7 @@ Usage:
     uv run scripts/train_ensemble.py --n-seeds 10 --total-timesteps 240000 --no-wandb
     uv run scripts/train_ensemble.py --seeds 0 1 2 3 4 --total-timesteps 240000 --no-wandb
     uv run scripts/train_ensemble.py --n-seeds 10 --prefix ens --no-wandb
+    uv run scripts/train_ensemble.py --n-seeds 10 --prefix s1 --target single --no-wandb
     uv run scripts/train_ensemble.py --n-seeds 10 --jobs 8 --no-wandb   # parallel
 """
 import sys
@@ -39,6 +40,8 @@ def _build_cmd(seed, args, train_script):
         cmd += ["--lr", str(args.lr)]
     if args.action_penalty is not None:
         cmd += ["--action-penalty", str(args.action_penalty)]
+    if args.target != "multi":
+        cmd += ["--target", args.target]
     if args.no_wandb:
         cmd += ["--no-wandb"]
     return name, cmd
@@ -79,6 +82,8 @@ def main():
                              "(see scripts/train.py --action-penalty).")
     parser.add_argument("--prefix", type=str, default="ensemble_model",
                         help="Model name prefix; saved as models/<prefix>_seed<seed>")
+    parser.add_argument("--target", choices=("multi", "single"), default="multi",
+                        help="Event class the reward targets (see scripts/train.py --target).")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel agents to train at once (default: cpu_count - 2; "
@@ -101,7 +106,8 @@ def main():
 
     print("=" * 70)
     print(f"ENSEMBLE TRAINING — {len(seeds)} agents, seeds = {seeds}")
-    print(f"  total_timesteps/agent = {args.total_timesteps} | prefix = {args.prefix} | workers = {n_workers}")
+    print(f"  total_timesteps/agent = {args.total_timesteps} | prefix = {args.prefix} | "
+          f"target = {args.target} | workers = {n_workers}")
     print("=" * 70)
 
     start = time.time()

@@ -50,7 +50,7 @@ PHASE_LABELS = {'total': 'All MYE', 'el_nino': 'Multi-year El Nino',
 
 
 def collect_events(env, var_names, state_std, n_runs, months, lead,
-                   min_duration, master_seed):
+                   min_duration, master_seed, target='multi'):
     """Free-run XRO and gather pre-onset state windows for spontaneous MYEs.
 
     Returns:
@@ -60,6 +60,12 @@ def collect_events(env, var_names, state_std, n_runs, months, lead,
     rng = np.random.default_rng(master_seed)
     seeds = [int(rng.integers(0, 2**31)) for _ in range(n_runs)]
     threshold = env.threshold
+    # Same run-length rule as classify_enso_event: multi-year > min_duration,
+    # single-year 6..min_duration.
+    if target == 'single':
+        in_class = lambda length: 6 <= length <= min_duration
+    else:
+        in_class = lambda length: length > min_duration
 
     # El Nino / La Nina collected separately; 'total' is their union.
     collected = {'el_nino': [], 'la_nina': []}
@@ -77,8 +83,7 @@ def collect_events(env, var_names, state_std, n_runs, months, lead,
         }
         for phase, binary in phase_binary.items():
             for start, _end, length in _find_continuous_runs(binary):
-                # Same multi-year criterion as classify_enso_event: length > min_duration.
-                if length > min_duration and start - lead >= 0:
+                if in_class(length) and start - lead >= 0:
                     collected[phase].append(states[start - lead:start])
 
     windows = {}
@@ -152,6 +157,9 @@ def main():
     parser.add_argument("--master-seed", type=int, default=42)
     parser.add_argument("--model", type=str, default="ensemble",
                         help="Namespace label (match the ensemble prefix)")
+    parser.add_argument("--target", choices=("multi", "single"), default="multi",
+                        help="Event class to composite: multi-year (> min_duration) "
+                             "or single-year (6..min_duration)")
     args = parser.parse_args()
 
     suppress_warnings()
@@ -163,13 +171,13 @@ def main():
     print("=" * 70)
     start = time.time()
 
-    env, var_names, state_std = build_env()
+    env, var_names, state_std = build_env(args.target)
     print(f"  N_RUNS={args.n_runs} MONTHS={args.months} LEAD={args.lead} "
-          f"MIN_DURATION={args.min_duration}")
+          f"MIN_DURATION={args.min_duration} TARGET={args.target}")
 
     windows, seeds = collect_events(env, var_names, state_std, args.n_runs,
                                     args.months, args.lead, args.min_duration,
-                                    args.master_seed)
+                                    args.master_seed, target=args.target)
     stats = composite_stats(windows, args.lead)
     _print_table(stats, var_names, args.lead)
 
@@ -177,6 +185,7 @@ def main():
     save = {
         'var_names': np.array(var_names),
         'lead': args.lead, 'min_duration': args.min_duration,
+        'target_event': args.target,
         'n_runs': args.n_runs, 'months': args.months,
         'seeds': np.array(seeds),
     }
